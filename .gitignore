@@ -1,0 +1,11 @@
+.venv/
+.runtime/
+.build-venv/
+.install-smoke/
+*.spec
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
+.coverage

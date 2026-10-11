@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "ssh-smoke-test",
+  "name": "SSH 基础验证",
+  "description": "无需ROS，先验证SSH、环境继承和Ctrl+C",
+  "common_init": "export SSH_MULTI_TEST=ok",
+  "windows": [
+    {"id": "environment", "name": "环境检查", "enabled": true, "working_directory": "~/", "commands": "printf 'environment=%s\\n' \"$SSH_MULTI_TEST\"\npwd\nuname -m", "start_delay_seconds": 0},
+    {"id": "interactive", "name": "交互检查", "enabled": true, "working_directory": "", "commands": "echo '运行中，每秒输出一次，按 Ctrl+C 停止'\nwhile true; do date; sleep 1; done", "start_delay_seconds": 1}
+  ]
+}

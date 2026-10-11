@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "rdkx5-demo",
+  "name": "RDK X5 开发启动",
+  "description": "请先按实际设备修改路径、包名和DDS设置",
+  "common_init": "source /opt/ros/humble/setup.bash\nsource ~/robot_ws/install/setup.bash\nexport ROS_DOMAIN_ID=10\nexport RMW_IMPLEMENTATION=rmw_cyclonedds_cpp",
+  "windows": [
+    {"id": "driver", "name": "驱动", "enabled": true, "working_directory": "~/robot_ws", "commands": "ros2 launch my_driver bringup.launch.py", "start_delay_seconds": 0},
+    {"id": "application", "name": "业务脚本", "enabled": true, "working_directory": "~/robot_ws/scripts", "commands": "python3 main.py", "start_delay_seconds": 3}
+  ]
+}
