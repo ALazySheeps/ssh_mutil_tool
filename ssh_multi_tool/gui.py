@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from .editor import ProfileEditor
-from .launcher import Launcher
+from .launcher import FINAL, Launcher
 from .models import validate_profile, validate_target
 from .ssh import UnknownHost, error_text, inspect_host, preflight, trust_host
 from .storage import Store, read_json
@@ -18,7 +18,7 @@ from .settings import connection_options
 
 STATE_NAMES = {"waiting": "等待", "opening": "打开终端", "connecting": "连接中", "initializing": "初始化中",
                "running": "执行中", "succeeded": "成功结束", "failed": "失败", "disconnected": "连接断开",
-               "unknown": "状态未知", "cancelled": "已取消"}
+               "unknown": "状态未知", "cancelled": "已取消", "closing": "关闭中", "closed": "已关闭", "interactive": "终端已连接"}
 
 
 def example_path():
@@ -110,14 +110,20 @@ class App(ttk.Frame):
         ttk.Label(config, textvariable=self.summary, wraplength=950).grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
         middle = ttk.Frame(self); middle.grid(row=3, column=0, sticky="nsew")
         middle.columnconfigure(0, weight=1); middle.rowconfigure(0, weight=3); middle.rowconfigure(2, weight=1)
-        self.table = ttk.Treeview(middle, columns=("name", "directory", "delay", "state"), show="headings", height=7)
+        self.table = ttk.Treeview(middle, columns=("name", "directory", "delay", "state"), show="headings", height=7, selectmode="browse")
         for column, label, width in [("name", "窗口", 170), ("directory", "远端工作目录", 390), ("delay", "延迟秒数", 90), ("state", "状态", 130)]:
             self.table.heading(column, text=label); self.table.column(column, width=width, minwidth=60, stretch=column in {"name", "directory"})
         self.table.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(middle, orient="vertical", command=self.table.yview)
         scrollbar.grid(row=0, column=1, sticky="ns"); self.table.configure(yscrollcommand=scrollbar.set)
         self.table.bind("<Double-1>", lambda event: self.edit_profile())
-        ttk.Label(middle, text="运行信息 · 执行中表示命令已开始，不能证明 ROS 节点已就绪").grid(row=1, column=0, sticky="w", pady=(12, 5))
+        self.table.bind("<<TreeviewSelect>>", lambda event: self._update_window_controls())
+        window_toolbar = ttk.Frame(middle); window_toolbar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 5))
+        ttk.Label(window_toolbar, text="运行信息 · 执行中表示命令已开始，不能证明 ROS 节点已就绪").pack(side="left")
+        self.remote_terminal_button = ttk.Button(window_toolbar, text="打开远程终端", command=self.open_remote_terminal)
+        self.remote_terminal_button.pack(side="right")
+        self.start_window_button = ttk.Button(window_toolbar, text="启动所选窗口", command=self.start_selected_window, state="disabled")
+        self.start_window_button.pack(side="right", padx=(0, 6))
         self.events_list = tk.Listbox(middle, height=4, borderwidth=1, relief="solid", exportselection=False)
         self.events_list.grid(row=2, column=0, columnspan=2, sticky="nsew")
         footer = ttk.Frame(self); footer.grid(row=4, column=0, sticky="ew", pady=(14, 0))
@@ -125,6 +131,12 @@ class App(ttk.Frame):
         ttk.Label(footer, textvariable=self.status).pack(side="left", padx=12)
         self.launch_button = ttk.Button(footer, text="一键启动", style="Launch.TButton", command=lambda: self.connection(True))
         self.launch_button.pack(side="right")
+        self.close_all_button = ttk.Button(footer, text="一键关闭", command=self.close_all_windows, state="disabled")
+        self.close_all_button.pack(side="right", padx=5)
+        self.restart_window_button = ttk.Button(footer, text="重启窗口", command=self.restart_selected_window, state="disabled")
+        self.restart_window_button.pack(side="right", padx=5)
+        self.close_window_button = ttk.Button(footer, text="关闭窗口", command=self.close_selected_window, state="disabled")
+        self.close_window_button.pack(side="right", padx=5)
 
     def log(self, text):
         self.events_list.insert("end", text)
@@ -203,6 +215,8 @@ class App(ttk.Frame):
                 self.table.insert("", "end", iid=window["id"], values=(window["name"], window["working_directory"] or "继承初始化目录",
                                   window["start_delay_seconds"], "待启动" if window["enabled"] else "已禁用"))
         else: self.summary.set("尚无配置。可新建配置或导入示例。")
+        self._sync_remote_windows(self.launcher.poll())
+        self._update_window_controls()
         if hasattr(self, "preferences"): self._save_preferences()
 
     def _save_preferences(self):
@@ -256,9 +270,11 @@ class App(ttk.Frame):
     def _work(self, function, success):
         if self.busy: return
         self.busy = True; self.launch_button.state(["disabled"]); self.test_button.state(["disabled"])
+        self._update_window_controls()
+        operation_epoch = self.launcher.control_epoch
         def worker():
-            try: result = function(); item = (True, result, function, success)
-            except Exception as exc: item = (False, exc, function, success)
+            try: result = function(); item = (True, result, function, success, operation_epoch)
+            except Exception as exc: item = (False, exc, function, success, operation_epoch)
             if not self.closed: self.work_queue.put(item)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -275,10 +291,112 @@ class App(ttk.Frame):
         except (ValueError, OSError, RuntimeError) as exc: messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
         self.log("正在验证SSH连接……")
         if start:
-            self._work(lambda: self.launcher.start(target, password, profile), lambda result: self.log("启动已调度；各窗口独立执行"))
+            operation_epoch = self.launcher.control_epoch
+            self._work(lambda: self.launcher.start(target, password, profile, expected_epoch=operation_epoch), lambda result: self.log("启动已调度；各窗口独立执行"))
         else:
             options = dict(self.launcher.connect_options)
             self._work(lambda: preflight(target, password, self.store.known_hosts, **options), lambda result: self.log("SSH连接及密码验证成功"))
+
+    def open_remote_terminal(self):
+        if self.busy: return
+        try:
+            check_terminal()
+            target = self.save_target(quiet=True); password = self.password.get()
+            if not password: raise ValueError("请输入SSH密码，密码仅在本次使用期间保留")
+        except (ValueError, OSError, RuntimeError) as exc:
+            messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
+        self.log("正在验证SSH连接并打开远程终端……")
+        operation_epoch = self.launcher.control_epoch
+        def opened(identifier):
+            self._sync_remote_windows(self.launcher.poll())
+            self.table.selection_set(identifier); self.table.see(identifier)
+            self.log("远程终端已打开，可在新窗口中手动输入命令")
+        profile = self.selected_profile()
+        self._work(lambda: self.launcher.open_remote_terminal(target, password, profile=profile, expected_epoch=operation_epoch), opened)
+
+    def _sync_remote_windows(self, tasks):
+        for identifier, task in tasks.items():
+            if task.get("mode") == "shell" and not self.table.exists(identifier):
+                self.table.insert("", "end", iid=identifier, values=(task["name"], "继承公共初始化目录" if task.get("inherits_init") else "远端登录目录", 0,
+                                  STATE_NAMES.get(task["state"], task["state"])))
+
+    def _selected_config_window(self):
+        selected = self.table.selection(); profile = self.selected_profile()
+        if selected and profile:
+            return next((w for w in profile["windows"] if w["id"] == selected[0]), None)
+        return None
+
+    def start_selected_window(self):
+        if self.busy: return
+        try:
+            profile = self.selected_profile(); window = self._selected_config_window()
+            if not window or not window["enabled"]: raise ValueError("请选择当前配置中启用的窗口")
+            check_terminal()
+            target = self.save_target(quiet=True); password = self.password.get()
+            if not password: raise ValueError("请输入SSH密码")
+        except (ValueError, OSError, RuntimeError) as exc:
+            messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
+        identifier = window["id"]; operation_epoch = self.launcher.control_epoch
+        def started(result):
+            current = self.selected_profile()
+            if current and current["id"] == profile["id"] and self.table.exists(identifier):
+                self.table.selection_set(identifier); self.table.see(identifier)
+            self.log("所选窗口已启动；其他窗口继续运行")
+        self.log("正在验证SSH连接并启动所选窗口……")
+        self._work(lambda: self.launcher.start_window(target, password, profile, identifier,
+                                                     expected_epoch=operation_epoch), started)
+
+    def _selected_run_window(self):
+        profile = self.selected_profile(); selected = self.table.selection()
+        if selected and selected[0] in self.launcher.shell_tasks: return selected[0]
+        if profile and profile["id"] == self.launcher.profile_id and selected and selected[0] in self.launcher.tasks:
+            return selected[0]
+        return None
+
+    def _update_window_controls(self):
+        identifier = self._selected_run_window()
+        tasks = self.launcher.poll()
+        state = tasks.get(identifier, {}).get("state") if identifier else None
+        window = self._selected_config_window(); profile = self.selected_profile()
+        current_task = tasks.get(window["id"]) if window and profile and profile["id"] == self.launcher.profile_id else None
+        can_start = bool(window and window["enabled"] and not self.busy and
+                         (not current_task or current_task["state"] in FINAL))
+        if self.launcher.active() and (not profile or profile["id"] != self.launcher.profile_id or self.target_id != self.launcher.target_id):
+            can_start = False
+        self.start_window_button.state(["!disabled"] if can_start else ["disabled"])
+        self.remote_terminal_button.state(["disabled"] if self.busy else ["!disabled"])
+        self.close_window_button.state(["!disabled"] if state and state not in {"closing", "closed"} else ["disabled"])
+        self.restart_window_button.state(["!disabled"] if identifier and state != "closing" and not self.busy else ["disabled"])
+        self.close_all_button.state(["!disabled"] if self.busy or self.launcher.all_tasks() else ["disabled"])
+
+    def close_selected_window(self):
+        identifier = self._selected_run_window()
+        if identifier is None: return
+        self.launcher.close_window(identifier)
+        self.log("已请求关闭所选窗口")
+        self._update_window_controls()
+
+    def close_all_windows(self):
+        self.launcher.close_all()
+        self.log("已请求关闭全部窗口，并取消延迟启动任务")
+        self._update_window_controls()
+
+    def restart_selected_window(self):
+        identifier = self._selected_run_window()
+        if identifier is None or self.busy: return
+        try:
+            shell_spec = self.launcher.shell_specs.get(identifier)
+            target_id = shell_spec["target"]["id"] if shell_spec else self.launcher.target_id
+            if self.target_id != target_id: raise ValueError("请先切回该窗口的目标并输入其SSH密码")
+            password = self.password.get()
+            if not password: raise ValueError("请输入本轮目标的SSH密码")
+            check_terminal()
+        except (ValueError, OSError, RuntimeError) as exc:
+            messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
+        self.log("正在验证连接并重启所选窗口……")
+        operation_epoch = self.launcher.control_epoch
+        self._work(lambda: self.launcher.restart_window(identifier, password, expected_epoch=operation_epoch), lambda result: self.log("所选窗口已重新启动"))
+        self._update_window_controls()
 
     def advanced_settings(self):
         if self.busy or self.launcher.active(): return
@@ -313,9 +431,11 @@ class App(ttk.Frame):
     def _poll(self):
         if self.closed: return
         while True:
-            try: ok, result, function, success = self.work_queue.get_nowait()
+            try: ok, result, function, success, operation_epoch = self.work_queue.get_nowait()
             except queue.Empty: break
             self.busy = False; self.launch_button.state(["!disabled"]); self.test_button.state(["!disabled"])
+            if operation_epoch != self.launcher.control_epoch:
+                self.log("操作已被一键关闭取消"); continue
             if ok: success(result)
             elif isinstance(result, UnknownHost):
                 if messagebox.askyesno('Confirm - SSH Multi Terminal', f"主机：{result.hostname}\n指纹：{result.fingerprint}\n\n请核对设备指纹，是否信任并继续？", parent=self.root):
@@ -325,17 +445,20 @@ class App(ttk.Frame):
             else:
                 self.log(error_text(result)); messagebox.showerror('Error - SSH Multi Terminal', error_text(result), parent=self.root)
         tasks = self.launcher.poll()
+        self._sync_remote_windows(tasks)
         profile = self.selected_profile()
         for identifier, task in tasks.items():
             state = STATE_NAMES.get(task["state"], task["state"])
             if task.get("exit_code") is not None: state += f" ({task['exit_code']})"
-            if profile and profile["id"] == self.launcher.profile_id and self.table.exists(identifier):
+            if self.table.exists(identifier) and (task.get("mode") == "shell" or (profile and profile["id"] == self.launcher.profile_id)):
                 self.table.set(identifier, "state", state)
             signature = (task["state"], task.get("exit_code"), task.get("error"))
-            if self.last_states.get((self.launcher.run_id, identifier)) != signature:
-                self.last_states[(self.launcher.run_id, identifier)] = signature
+            session_id = task.get("session_id", self.launcher.run_id)
+            if self.last_states.get((session_id, identifier)) != signature:
+                self.last_states[(session_id, identifier)] = signature
                 self.log(f"{task['name']}：{state}" + (" · " + task["error"] if task.get("error") else ""))
         self.launch_button.state(["disabled"] if self.busy or self.launcher.active() else ["!disabled"])
+        self._update_window_controls()
         self.root.after(100, self._poll)
 
     def close(self):

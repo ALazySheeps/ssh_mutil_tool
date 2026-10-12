@@ -6,6 +6,7 @@ import shlex
 import sys
 import time
 import socket
+import threading
 
 from .broker import request
 from .ssh import connect, error_text
@@ -31,7 +32,7 @@ class PhaseParser:
                         output.append(self.buffer.pop(0)); continue
                     break
                 phase = bytes(self.buffer[len(self.prefix):end])
-                if phase in (b"ready", b"initializing", b"running"):
+                if phase in (b"ready", b"initializing", b"running", b"interactive"):
                     phases.append(phase.decode()); del self.buffer[:end + 1]
                 else:
                     output.extend(self.buffer[:end + 1]); del self.buffer[:end + 1]
@@ -59,17 +60,22 @@ def loader_command(script: bytes, marker: str):
     return "bash --noprofile --norc -c " + shlex.quote(body)
 
 
-def run_session(snapshot, events, *, output=None, interactive=True):
+def run_session(snapshot, events, *, output=None, interactive=True, stop=None):
     output = output or sys.stdout.buffer
     client = None; channel = None; old_settings = None
     input_fd = None; previous_size = None; started = False; pending = bytearray()
+    shell = snapshot.get("mode") == "shell" and not snapshot["script"]
     parser = PhaseParser(snapshot["marker"])
     script = snapshot["script"].encode("utf-8")
     def event(state, **extra): events({"state": state, **extra})
+    if stop is not None and stop.is_set():
+        event("closed"); return 0
     event("connecting")
     try:
         client = connect(snapshot["target"], snapshot.pop("password"), snapshot["known_hosts"],
                          **snapshot.get("connect_options", {}))
+        if stop is not None and stop.is_set():
+            event("closed"); return 0
         channel = client.get_transport().open_session(timeout=10)
         if interactive:
             import termios
@@ -80,20 +86,25 @@ def run_session(snapshot, events, *, output=None, interactive=True):
             previous_size = os.get_terminal_size(input_fd)
         width, height = (previous_size.columns, previous_size.lines) if previous_size else (100, 30)
         channel.get_pty(term=os.environ.get("TERM", "xterm-256color"), width=width, height=height)
-        channel.exec_command(loader_command(script, snapshot["marker"]))
+        if shell: channel.invoke_shell()
+        else: channel.exec_command(loader_command(script, snapshot["marker"]))
         channel.settimeout(0)
         if interactive: tty.setraw(input_fd)
+        if shell:
+            started = True; event("interactive")
         ready_deadline = time.monotonic() + 15
         while True:
+            if stop is not None and stop.is_set():
+                event("closed"); return 0
             for _ in range(16):
                 if not channel.recv_ready(): break
                 data = channel.recv(65536)
-                visible, phases = parser.feed(data)
+                visible, phases = (data, []) if shell else parser.feed(data)
                 if visible: output.write(visible); output.flush()
                 for phase in phases:
                     if phase == "ready" and not started:
                         pending.extend(script); started = True
-                    elif phase in ("initializing", "running"): event(phase)
+                    elif phase in ("initializing", "running", "interactive"): event(phase)
             if pending and channel.send_ready():
                 try:
                     sent = channel.send(bytes(pending[:32768]))
@@ -128,17 +139,26 @@ def run_session(snapshot, events, *, output=None, interactive=True):
     except Exception as exc:
         event("failed", error=error_text(exc)); return 255
     finally:
+        if channel is not None: channel.close()
+        if client is not None: client.close()
         if old_settings is not None:
             import termios
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
-        if channel is not None: channel.close()
-        if client is not None: client.close()
 
 
 def helper_main(socket_path, token):
-    result = 255
+    result = 255; snapshot = None
+    stop = threading.Event(); done = threading.Event(); controller = None
     try:
         snapshot = request(socket_path, {"op": "claim", "token": token})
+        def control():
+            while not done.is_set():
+                try:
+                    if request(socket_path, {"op": "control", "token": snapshot["control_token"]}).get("close"):
+                        stop.set(); return
+                except (OSError, ValueError): return
+                done.wait(.1)
+        controller = threading.Thread(target=control, daemon=True); controller.start()
         def send_event(event):
             message = {**event, "run_id": snapshot["run_id"], "task_id": snapshot["task_id"], "time": time.time()}
             request(socket_path, {"op": "event", "token": snapshot["event_token"], "event": message})
@@ -146,11 +166,21 @@ def helper_main(socket_path, token):
         def events(event):
             if event.get("error"): print("\r\n" + event["error"], flush=True)
             reporter.emit(event)
-        try: result = run_session(snapshot, events)
+        try: result = run_session(snapshot, events, stop=stop)
         finally: reporter.close()
-        print(f"\n任务已结束，退出码：{result}。")
+        if not stop.is_set():
+            print(f"\n任务已结束，退出码：{result}。\n按回车关闭此窗口……", flush=True)
+            while not stop.is_set():
+                ready, _, _ = select.select([sys.stdin], [], [], .1)
+                if ready:
+                    sys.stdin.readline(); break
+    except (KeyboardInterrupt, EOFError): pass
     except Exception as exc:
         print("\n无法启动会话：" + error_text(exc))
-    try: input("按回车关闭此窗口……")
-    except (EOFError, KeyboardInterrupt): pass
+    finally:
+        done.set()
+        if controller is not None: controller.join(timeout=.2)
+        if snapshot is not None:
+            try: request(socket_path, {"op": "released", "token": snapshot["control_token"]})
+            except (OSError, ValueError): pass
     return result

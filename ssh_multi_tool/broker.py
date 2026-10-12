@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import secrets
+import select
 import socket
 import struct
 import sys
@@ -13,13 +14,14 @@ import time
 from pathlib import Path
 
 MAX_FRAME = 2 * 1024 * 1024
-STATES = {"connecting", "initializing", "running", "succeeded", "failed", "disconnected", "unknown"}
+STATES = {"connecting", "initializing", "running", "succeeded", "failed", "disconnected", "unknown", "closed", "interactive"}
 
 
 class TokenVault:
     def __init__(self, clock=time.monotonic):
         self.clock = clock; self.lock = threading.Lock()
         self.pending = {}; self.event_tokens = {}
+        self.sessions = {}; self.controls = {}
 
     def issue(self, snapshot):
         with self.lock:
@@ -32,7 +34,7 @@ class TokenVault:
         for token, (deadline, _) in list(self.pending.items()):
             if deadline <= self.clock(): del self.pending[token]
 
-    def claim(self, token):
+    def claim(self, token, pid=None):
         with self.lock:
             self._expire()
             item = self.pending.pop(token, None)
@@ -40,10 +42,50 @@ class TokenVault:
             snapshot = item[1]; event_token = secrets.token_urlsafe(32)
             snapshot["event_token"] = event_token
             self.event_tokens[event_token] = (snapshot["run_id"], snapshot["task_id"])
+            control_token = secrets.token_urlsafe(32)
+            snapshot["control_token"] = control_token
+            self.sessions[token] = control_token
+            pidfd = None
+            if pid is not None and hasattr(os, "pidfd_open"):
+                try: pidfd = os.pidfd_open(pid)
+                except OSError: pass
+            self.controls[control_token] = {"close": False, "event_token": event_token,
+                                            "launch_token": token, "pidfd": pidfd}
             return snapshot
 
     def cancel(self, token):
-        with self.lock: self.pending.pop(token, None)
+        with self.lock:
+            self.pending.pop(token, None)
+            control = self.sessions.get(token)
+            if control in self.controls: self.controls[control]["close"] = True
+
+    def cancel_all(self):
+        with self.lock:
+            self.pending.clear()
+            for item in self.controls.values(): item["close"] = True
+
+    def _release(self, token):
+        item = self.controls.pop(token)
+        self.sessions.pop(item["launch_token"], None)
+        self.event_tokens.pop(item["event_token"], None)
+        if item["pidfd"] is not None: os.close(item["pidfd"])
+
+    def is_closed(self, token):
+        with self.lock:
+            self._expire()
+            control = self.sessions.get(token)
+            if control:
+                pidfd = self.controls[control]["pidfd"]
+                if pidfd is not None and select.select([pidfd], [], [], 0)[0]: self._release(control)
+            return token not in self.pending and token not in self.sessions
+
+    def control(self, token, released=False):
+        with self.lock:
+            item = self.controls.get(token)
+            if item is None: raise ValueError("控制认证失败")
+            if released:
+                self._release(token)
+            return {"close": item["close"]}
 
     def event(self, token, event):
         with self.lock:
@@ -56,12 +98,14 @@ class TokenVault:
                 raise ValueError("未知任务状态")
             allowed = {"run_id", "task_id", "state", "exit_code", "error", "time"}
             if event.keys() - allowed: raise ValueError("未知事件字段")
-            if event.get("state") in {"succeeded", "failed", "disconnected"}:
+            if event.get("state") in {"succeeded", "failed", "disconnected", "closed"}:
                 del self.event_tokens[token]
             return True
 
     def close(self):
-        with self.lock: self.pending.clear(); self.event_tokens.clear()
+        with self.lock:
+            for token in list(self.controls): self._release(token)
+            self.pending.clear(); self.event_tokens.clear()
 
 
 def _recv_exact(stream, length):
@@ -116,6 +160,8 @@ class Broker:
 
     def issue(self, snapshot): return self.vault.issue(snapshot)
     def cancel(self, token): self.vault.cancel(token)
+    def is_closed(self, token): return self.vault.is_closed(token)
+    def cancel_all(self): self.vault.cancel_all()
 
     def _accept(self):
         while not self.stop.is_set():
@@ -129,12 +175,14 @@ class Broker:
     def _handle(self, stream):
         try:
             stream.settimeout(5)
-            _, uid, _ = struct.unpack("3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            pid, uid, _ = struct.unpack("3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
             if uid != os.getuid(): raise ValueError("用户身份不匹配")
             message = _receive(stream); op = message.get("op"); token = message.get("token")
             if not isinstance(token, str) or len(token) > 128: raise ValueError("认证令牌无效")
             if op == "claim":
-                data = self.vault.claim(token)
+                data = self.vault.claim(token, pid=pid)
+            elif op in {"control", "released"}:
+                data = self.vault.control(token, released=op == "released")
             elif op == "event":
                 event = message.get("event")
                 self.vault.event(token, event)

@@ -2,7 +2,7 @@
 import queue
 import threading
 
-FINAL = {"succeeded", "failed", "disconnected"}
+FINAL = {"succeeded", "failed", "disconnected", "closed"}
 
 
 class Reporter:
