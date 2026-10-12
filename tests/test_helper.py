@@ -12,6 +12,13 @@ from test_models import profile
 
 
 class HelperTests(unittest.TestCase):
+    def test_cancelled_session_does_not_connect(self):
+        stop = threading.Event(); stop.set(); events = []
+        snapshot = {"marker": "a" * 32, "script": "echo hello"}
+        self.assertEqual(run_session(snapshot, events.append, output=io.BytesIO(),
+                                     interactive=False, stop=stop), 0)
+        self.assertEqual(events[-1]["state"], "closed")
+
     def test_large_bidirectional_flow_does_not_deadlock(self):
         with tempfile.TemporaryDirectory() as tmp:
             server = SSHServer(output_before_script=b"x" * (3 * 1024 * 1024))
