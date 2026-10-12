@@ -21,19 +21,23 @@ class Server(paramiko.ServerInterface):
         return True
     def check_channel_window_change_request(self, channel, width, height, pixelwidth, pixelheight):
         self.owner.sizes.append((width, height)); return True
+    def check_channel_shell_request(self, channel):
+        threading.Thread(target=self.owner.shell, args=(channel,), daemon=True).start()
+        return True
     def check_channel_exec_request(self, channel, command):
         threading.Thread(target=self.owner.execute, args=(channel, command), daemon=True).start()
         return True
 
 
 class SSHServer:
-    def __init__(self, key=None, exit_code=0, output_before_script=b""):
+    def __init__(self, key=None, exit_code=0, output_before_script=b"", hold=False, phase="running"):
         self.key = key or paramiko.RSAKey.generate(2048); self.exit_code = exit_code
         self.listener = socket.socket(); self.listener.bind(("127.0.0.1", 0)); self.listener.listen()
         self.listener.settimeout(.1); self.port = self.listener.getsockname()[1]
         self.stop = threading.Event(); self.transports = []; self.sizes = []
         self.command = b""; self.script = b""; self.output = "hello 中文\n".encode()
-        self.output_before_script = output_before_script
+        self.output_before_script = output_before_script; self.hold = hold; self.phase = phase
+        self.shell_input = bytearray(); self.shell_received = threading.Event()
         self.thread = threading.Thread(target=self.accept, daemon=True); self.thread.start()
 
     def target(self):
@@ -62,9 +66,26 @@ class SSHServer:
             if not data: break
             self.script += data
         channel.sendall(b"\x1e" + marker + b":initializing\x1f")
-        channel.sendall(b"\x1e" + marker + b":running\x1f" + self.output)
+        channel.sendall(b"\x1e" + marker + b":" + self.phase.encode() + b"\x1f" + self.output)
+        while self.hold and not channel.closed and not self.stop.wait(.01): pass
+        if channel.closed: return
         if self.exit_code is not None: channel.send_exit_status(self.exit_code)
         channel.close()
+
+    def shell(self, channel):
+        try:
+            channel.sendall(self.output)
+            if self.hold:
+                channel.settimeout(.1)
+                while not channel.closed and not self.stop.is_set():
+                    try: data = channel.recv(4096)
+                    except socket.timeout: continue
+                    if not data: return
+                    self.shell_input.extend(data); self.shell_received.set()
+                    channel.sendall(data)
+            else:
+                channel.send_exit_status(0); channel.close()
+        except (OSError, EOFError): pass
 
     def close(self):
         self.stop.set(); self.listener.close()
