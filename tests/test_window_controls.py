@@ -1,4 +1,6 @@
 import os
+import queue
+import select
 import pty
 import subprocess
 import tempfile
@@ -87,8 +89,14 @@ class WindowControlsTests(unittest.TestCase):
                                        start_new_session=True)
             os.close(slave)
             try:
+                received = []
                 while True:
-                    event = broker.events.get(timeout=5)
+                    try: event = broker.events.get(timeout=5)
+                    except queue.Empty:
+                        ready, _, _ = select.select([master], [], [], .1)
+                        output = os.read(master, 65536) if ready else b""
+                        self.fail(f"Missing helper event; received={received}; exit={process.poll()}; output={output!r}")
+                    received.append(event)
                     if hold and event['state'] == 'running': break
                     if event['state'] in {'succeeded', 'failed', 'disconnected'}:
                         self.assertFalse(hold, 'running session unexpectedly ended')

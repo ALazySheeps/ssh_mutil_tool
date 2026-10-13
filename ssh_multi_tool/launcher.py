@@ -10,8 +10,9 @@ from pathlib import Path
 from .broker import Broker
 from .models import validate_profile, validate_target
 from .scripts import build_script, build_interactive_script
+from .settings import validate_debug_slot
 from .ssh import preflight, error_text
-from .terminal import open_terminal
+from .terminal import open_terminal, TerminalGroups, target_key
 
 FINAL = {"succeeded", "failed", "disconnected", "cancelled", "closed"}
 
@@ -26,12 +27,14 @@ class Launcher:
     def __init__(self, known_hosts, *, preflight_fn=preflight, broker_factory=Broker, open_fn=open_terminal, connect_options=None):
         self.known_hosts = str(known_hosts); self.preflight_fn = preflight_fn
         self.broker_factory = broker_factory; self.open_fn = open_fn
+        self.terminal_groups = TerminalGroups() if open_fn is open_terminal else None
         self.broker = None; self.thread = None; self.tasks = {}; self.run_id = None
         self.lock = threading.RLock(); self.cancel = threading.Event(); self.closed = False
         self.starting = False; self.profile_id = None; self.target_id = None
         self.connect_options = dict(connect_options or {})
         self.run_target = None; self.run_profile = None; self.run_options = {}; self.control_epoch = 0
         self.shell_tasks = {}; self.shell_specs = {}; self.window_specs = {}
+        self.restarting = set(); self.shell_count = 0
 
     def active(self):
         with self.lock:
@@ -78,7 +81,8 @@ class Launcher:
                     if cancel.is_set() or self.closed or self.tasks is not tasks: break
                     task = self.tasks[window["id"]]
                     if task["state"] != "waiting": continue
-                    self._open_window(window, password, self.run_id)
+                    opening = self._prepare_window(window, password, self.run_id)
+                self._launch_prepared(opening)
 
         finally:
             password = None
@@ -86,7 +90,7 @@ class Launcher:
                 for task in tasks.values():
                     if task["state"] == "waiting": task["state"] = "cancelled"
 
-    def _open_window(self, window, password, session_id):
+    def _prepare_window(self, window, password, session_id):
         spec = self.window_specs[window["id"]]
         marker = secrets.token_hex(16)
         snapshot = {"run_id": session_id, "task_id": window["id"], "target": spec["target"],
@@ -98,10 +102,8 @@ class Launcher:
         task.clear()
         task.update(name=window["name"], state="opening", token=token,
                     session_id=session_id, opened_at=time.monotonic())
-        try:
-            self.open_fn(self.broker.path, token, f"{spec['target']['name']} · {window['name']}")
-        except Exception as exc:
-            self.broker.cancel(token); task.update(state="failed", error=error_text(exc))
+        return {"target": spec["target"], "token": token, "title": f"{spec['target']['name']} · {window['name']}",
+                "task": task, "identifier": window["id"], "epoch": self.control_epoch, "raise_errors": False}
 
     def start_window(self, target, password, profile, identifier, *, expected_epoch=None):
         target = validate_target(target); profile = validate_profile(profile)
@@ -131,49 +133,105 @@ class Launcher:
                 self.window_specs[identifier] = {"target": target, "profile": profile,
                                                   "window": window, "connect_options": options}
                 self.tasks[identifier] = {"name": window["name"]}
-                self._open_window(window, password, uuid.uuid4().hex)
-                return identifier
+                opening = self._prepare_window(window, password, uuid.uuid4().hex)
+            self._launch_prepared(opening)
+            return identifier
         finally:
             with self.lock: self.starting = False
 
     def all_tasks(self):
         return {**self.tasks, **self.shell_tasks}
 
-    def open_remote_terminal(self, target, password, *, profile=None, expected_epoch=None):
+    def _spawn_terminal(self, target, token, title):
+        if self.terminal_groups is not None: return self.terminal_groups.open(target, self.broker.path, token, title)
+        return self.open_fn(self.broker.path, token, title)
+
+    def focus_window(self, identifier):
+        with self.lock:
+            task = self.all_tasks().get(identifier)
+            token = task.get("token") if task else None
+        return bool(token and self.terminal_groups is not None and self.terminal_groups.focus(token))
+
+    def find_debug_terminal(self, target, slot, slot_index=None):
+        with self.lock:
+            tasks = self.poll(); closing = False
+            for identifier, spec in self.shell_specs.items():
+                same_slot = spec.get("slot_index") == slot_index if slot_index is not None else spec["debug_slot"] == slot
+                if spec["debug_slot"] is not None and same_slot and target_key(spec["target"]) == target_key(target):
+                    state = tasks[identifier]["state"]
+                    if state == "closing": closing = True; continue
+                    if state not in FINAL: return identifier
+            if closing: raise ValueError("该调试会话正在关闭，请稍后重试")
+        return None
+
+    def open_debug_terminal(self, target, password, profile, slot, *, slot_index=None, force_new=False, expected_epoch=None):
+        return self.open_remote_terminal(target, password, profile=profile, debug_slot=slot, slot_index=slot_index,
+                                         force_new=force_new, expected_epoch=expected_epoch)
+
+    def open_remote_terminal(self, target, password, *, profile=None, debug_slot=None, slot_index=None, force_new=False, expected_epoch=None):
         target = validate_target(target)
         profile = validate_profile(profile) if profile is not None else None
-        if not password: raise ValueError("请输入SSH密码")
+        if debug_slot is not None:
+            debug_slot = validate_debug_slot(debug_slot)
+            if not debug_slot["commands"].strip(): raise ValueError("请先配置该调试槽位的命令")
+            if profile is None: raise ValueError("请选择启动配置，以继承公共初始化")
         with self.lock:
             if self.closed: raise ValueError("启动器已关闭")
             epoch = self.control_epoch
             if expected_epoch is not None and expected_epoch != epoch: raise ValueError("启动已取消")
+            existing = self.find_debug_terminal(target, debug_slot, slot_index) if debug_slot is not None and not force_new else None
             options = dict(self.connect_options)
+        if existing is not None: return existing
+        if not password: raise ValueError("请输入SSH密码")
         self.preflight_fn(target, password, Path(self.known_hosts), **options)
         with self.lock:
             if self.closed or self.control_epoch != epoch: raise ValueError("启动已取消")
+            existing = self.find_debug_terminal(target, debug_slot, slot_index) if debug_slot is not None and not force_new else None
+            if existing is not None: return existing
             if self.broker is None: self.broker = self.broker_factory()
             identifier = "shell_" + uuid.uuid4().hex
-            name = f"{target['name']} · 远程终端 {len(self.shell_specs) + 1}"
-            self.shell_specs[identifier] = {"target": target, "connect_options": options, "name": name, "profile": profile}
+            self.shell_count += 1
+            name = f"{target['name']} · {debug_slot['name']}" if debug_slot else f"{target['name']} · 远程终端 {self.shell_count}"
+            self.shell_specs[identifier] = {"target": target, "connect_options": options, "name": name, "profile": profile, "debug_slot": debug_slot, "slot_index": slot_index}
             self.shell_tasks[identifier] = {"name": name}
-            self._open_shell(identifier, password)
-            return identifier
+            opening = self._prepare_shell(identifier, password)
+        self._launch_prepared(opening)
+        return identifier
 
-    def _open_shell(self, identifier, password):
+    def _prepare_shell(self, identifier, password):
         spec = self.shell_specs[identifier]
         session_id = uuid.uuid4().hex; marker = secrets.token_hex(16)
-        script = build_interactive_script(spec["profile"], marker) if spec["profile"] is not None else ""
+        if spec["debug_slot"] is not None:
+            script = build_script(spec["profile"], {"working_directory": "", "commands": spec["debug_slot"]["commands"]}, marker)
+        else: script = build_interactive_script(spec["profile"], marker) if spec["profile"] is not None else ""
         snapshot = {"run_id": session_id, "task_id": identifier, "target": spec["target"],
-                    "password": password, "known_hosts": self.known_hosts, "mode": "shell",
+                    "password": password, "known_hosts": self.known_hosts, "mode": "debug" if spec["debug_slot"] is not None else "shell",
                     "script": script, "marker": marker, "connect_options": spec["connect_options"]}
         token = self.broker.issue(snapshot)
         task = self.shell_tasks[identifier]
         task.clear()
         task.update(name=spec["name"], mode="shell", inherits_init=spec["profile"] is not None, state="opening", token=token,
                     session_id=session_id, opened_at=time.monotonic())
-        try: self.open_fn(self.broker.path, token, spec["name"])
+        return {"target": spec["target"], "token": token, "title": spec["name"], "task": task,
+                "identifier": identifier, "epoch": self.control_epoch, "raise_errors": True}
+
+    def _launch_prepared(self, opening):
+        token = opening["token"]; task = opening["task"]
+        with self.lock:
+            current = self.all_tasks().get(opening["identifier"])
+            cancelled = (self.closed or self.control_epoch != opening["epoch"] or current is not task
+                         or task.get("token") != token or task["state"] != "opening")
+            if cancelled:
+                self.broker.cancel(token)
+                if opening["raise_errors"]: raise ValueError("启动已取消")
+                return
+        try: self._spawn_terminal(opening["target"], token, opening["title"])
         except Exception as exc:
-            self.broker.cancel(token); task.update(state="failed", error=error_text(exc))
+            with self.lock:
+                self.broker.cancel(token)
+                if self.all_tasks().get(opening["identifier"]) is task and task.get("token") == token and task["state"] == "opening":
+                    task.update(state="failed", error=error_text(exc))
+            if opening["raise_errors"]: raise RuntimeError(error_text(exc)) from exc
 
     def close_window(self, identifier):
         with self.lock:
@@ -192,6 +250,15 @@ class Launcher:
             for identifier in self.all_tasks(): self.close_window(identifier)
 
     def restart_window(self, identifier, password, *, expected_epoch=None):
+        with self.lock:
+            if identifier in self.restarting: raise ValueError("窗口正在重启，请稍后重试")
+            self.restarting.add(identifier)
+        try:
+            return self._restart_window(identifier, password, expected_epoch=expected_epoch)
+        finally:
+            with self.lock: self.restarting.discard(identifier)
+
+    def _restart_window(self, identifier, password, *, expected_epoch=None):
         if not password: raise ValueError("请输入本轮目标的SSH密码")
         with self.lock:
             if self.closed: raise ValueError("启动器已关闭")
@@ -216,8 +283,8 @@ class Launcher:
             if time.monotonic() >= deadline: raise ValueError("旧窗口尚未确认关闭，未启动新窗口")
         with self.lock:
             if self.closed or (not is_shell and self.run_id != run_id) or self.control_epoch != epoch: raise ValueError("重启已取消")
-            if is_shell: self._open_shell(identifier, password)
-            else: self._open_window(window, password, uuid.uuid4().hex)
+            opening = self._prepare_shell(identifier, password) if is_shell else self._prepare_window(window, password, uuid.uuid4().hex)
+        self._launch_prepared(opening)
 
     def poll(self):
         with self.lock:
@@ -239,6 +306,11 @@ class Launcher:
                         task.update(state="unknown", error="终端未报告连接状态；请检查窗口后再启动")
                     elif task["state"] in {"connecting", "initializing", "running", "interactive"} and time.monotonic() - task["last_seen"] >= 20:
                         task.update(state="unknown", error="终端会话未报告心跳；请检查窗口和远端进程后再启动")
+            for identifier, task in list(self.shell_tasks.items()):
+                if identifier not in self.restarting and self.broker is not None and self.broker.is_closed(task["token"]):
+                    self.shell_tasks.pop(identifier)
+                    self.shell_specs.pop(identifier)
+                    tasks.pop(identifier)
             return {key: dict(value) for key, value in tasks.items()}
 
     def cancel_pending(self):

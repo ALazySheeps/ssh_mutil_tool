@@ -6,7 +6,7 @@ if [[ "$(uname -s)" != Linux ]]; then
 fi
 if ! command -v python3 >/dev/null || ! python3 -c 'import tkinter, venv; import sys; assert sys.version_info >= (3,10)' 2>/dev/null; then
   echo "缺少Python 3.10+、Tk或venv。Ubuntu请先运行：" >&2
-  echo "  sudo apt install python3 python3-tk python3-venv gnome-terminal fonts-noto-cjk" >&2
+  echo "  sudo apt install python3 python3-tk python3-venv gnome-terminal fonts-noto-cjk libglib2.0-bin libatspi2.0-0" >&2
   exit 1
 fi
 python3 -m venv "$root/.venv"

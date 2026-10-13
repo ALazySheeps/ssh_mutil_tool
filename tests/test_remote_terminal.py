@@ -146,3 +146,108 @@ class RemoteTerminalTests(unittest.TestCase):
             finally:
                 if process.poll() is None: process.kill(); process.wait()
                 os.close(master)
+
+    def test_closed_manual_terminal_is_removed_with_its_snapshot(self):
+        launch, broker, calls, target = self.launcher()
+        identifier = launch.open_remote_terminal(target, 'secret')
+        launch.close_window(identifier)
+        self.assertNotIn(identifier, launch.poll())
+        self.assertNotIn(identifier, launch.shell_tasks)
+        self.assertNotIn(identifier, launch.shell_specs)
+
+    def test_result_screen_is_kept_until_helper_releases_window(self):
+        launch, broker, calls, target = self.launcher()
+        identifier = launch.open_remote_terminal(target, 'secret')
+        snapshot = request(broker.path, {'op': 'claim', 'token': calls[-1][1]})
+        broker.events.put({'run_id': snapshot['run_id'], 'task_id': identifier, 'state': 'succeeded'})
+        self.assertIn(identifier, launch.poll())
+        request(broker.path, {'op': 'released', 'token': snapshot['control_token']})
+        self.assertNotIn(identifier, launch.poll())
+        broker.events.put({'run_id': snapshot['run_id'], 'task_id': identifier, 'state': 'interactive'})
+        self.assertNotIn(identifier, launch.poll())
+
+    def test_poll_does_not_remove_window_during_restart(self):
+        launch, broker, calls, target = self.launcher()
+        identifier = launch.open_remote_terminal(target, 'secret')
+        snapshot = request(broker.path, {'op': 'claim', 'token': calls[-1][1]})
+        entered = threading.Event(); release = threading.Event(); errors = []
+        def preflight(*a, **kw): entered.set(); release.wait(2)
+        launch.preflight_fn = preflight
+        def restart():
+            try: launch.restart_window(identifier, 'secret')
+            except Exception as exc: errors.append(exc)
+        worker = threading.Thread(target=restart); worker.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            request(broker.path, {'op': 'released', 'token': snapshot['control_token']})
+            self.assertIn(identifier, launch.poll())
+            release.set(); worker.join(2)
+            self.assertEqual(errors, []); self.assertEqual(len(calls), 2)
+            self.assertEqual(launch.poll()[identifier]['state'], 'opening')
+        finally: release.set(); worker.join(2)
+
+    def test_open_failure_reports_error_before_auto_cleanup(self):
+        launch, broker, calls, target = self.launcher()
+        def fail(*a): raise OSError('terminal unavailable')
+        launch.open_fn = fail
+        with self.assertRaisesRegex(RuntimeError, '连接或本机资源失败'):
+            launch.open_remote_terminal(target, 'secret')
+        self.assertEqual(launch.poll(), {})
+        self.assertEqual(launch.shell_specs, {})
+
+    def test_external_helper_exit_removes_manual_record(self):
+        launch, broker, calls, target = self.launcher()
+        identifier = launch.open_remote_terminal(target, 'secret')
+        import sys
+        code = "from ssh_multi_tool.broker import request; import sys,time; request(sys.argv[1], {'op':'claim','token':sys.argv[2]}); print('ready',flush=True); time.sleep(30)"
+        process = subprocess.Popen([sys.executable, '-c', code, broker.path, calls[-1][1]], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline().strip(), 'ready')
+            self.assertIn(identifier, launch.poll())
+            process.kill(); process.wait(timeout=2)
+            self.assertNotIn(identifier, launch.poll())
+            self.assertNotIn(identifier, launch.shell_specs)
+        finally:
+            if process.poll() is None: process.kill(); process.wait()
+            process.stdout.close()
+
+    def test_close_all_remains_responsive_during_terminal_launch(self):
+        launch, broker, calls, target = self.launcher()
+        entered = threading.Event(); release = threading.Event(); closed = threading.Event(); errors = []
+        def opening(*a): entered.set(); release.wait(3)
+        launch.open_fn = opening
+        def start():
+            try: launch.open_remote_terminal(target, 'secret')
+            except ValueError as exc: errors.append(str(exc))
+        worker = threading.Thread(target=start); worker.start()
+        closer = threading.Thread(target=lambda: (launch.close_all(), closed.set()))
+        try:
+            self.assertTrue(entered.wait(1)); closer.start()
+            self.assertTrue(closed.wait(1), 'close-all must not wait for desktop IPC')
+            self.assertEqual(launch.poll(), {})
+        finally:
+            release.set(); worker.join(3)
+            if closer.ident is not None: closer.join(3)
+
+    def test_old_desktop_launch_failure_cannot_overwrite_restarted_session(self):
+        launch, broker, calls, target = self.launcher()
+        entered = threading.Event(); release = threading.Event(); errors = []
+        def opening(*args):
+            calls.append(args)
+            if len(calls) == 1:
+                entered.set(); release.wait(3); raise OSError('old launch failed')
+        launch.open_fn = opening
+        def start():
+            try: launch.open_remote_terminal(target, 'secret')
+            except RuntimeError as exc: errors.append(str(exc))
+        worker = threading.Thread(target=start); worker.start()
+        try:
+            self.assertTrue(entered.wait(1)); identifier = next(iter(launch.shell_tasks))
+            launch.close_window(identifier); launch.restart_window(identifier, 'secret')
+            current_token = launch.shell_tasks[identifier]['token']
+            release.set(); worker.join(3)
+            self.assertTrue(errors)
+            task = launch.poll()[identifier]
+            self.assertEqual(task['token'], current_token)
+            self.assertEqual(task['state'], 'opening')
+        finally: release.set(); worker.join(3)

@@ -9,12 +9,13 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from .editor import ProfileEditor
+from .debug_editor import DebugSlotsEditor
 from .launcher import FINAL, Launcher
 from .models import validate_profile, validate_target
 from .ssh import UnknownHost, error_text, inspect_host, preflight, trust_host
 from .storage import Store, read_json
 from .terminal import check_terminal
-from .settings import connection_options
+from .settings import connection_options, debug_slots, debug_preferences
 
 STATE_NAMES = {"waiting": "等待", "opening": "打开终端", "connecting": "连接中", "initializing": "初始化中",
                "running": "执行中", "succeeded": "成功结束", "failed": "失败", "disconnected": "连接断开",
@@ -40,9 +41,11 @@ class App(ttk.Frame):
                             for key in ("name", "host", "port", "username")}
         self.password = tk.StringVar(); self.show_password = tk.BooleanVar(); self.status = tk.StringVar(value="就绪")
         self.summary = tk.StringVar(value="选择或新建启动配置")
+        self.debug_slots = debug_slots({})
         self._build()
         try: self.preferences = self.store.preferences()
         except (ValueError, OSError) as exc: self.preferences = {}; self.log(f"偏好恢复失败：{exc}")
+        self.debug_slots = debug_slots(self.preferences)
         try: self.launcher.connect_options = connection_options(self.preferences)
         except ValueError as exc:
             self.preferences.pop("connect_timeout", None); self.preferences.pop("auth_timeout", None)
@@ -108,16 +111,46 @@ class App(ttk.Frame):
                               ("导入", self.import_profile), ("导出", self.export_profile)]:
             ttk.Button(buttons, text=text, command=command, width=6).pack(side="left", padx=2)
         ttk.Label(config, textvariable=self.summary, wraplength=950).grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        debug_toolbar = ttk.Frame(config); debug_toolbar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Label(debug_toolbar, text="特别调试窗口").pack(side="left", padx=(0, 10))
+        self.debug_buttons = []
+        for index, slot in enumerate(self.debug_slots):
+            button = ttk.Button(debug_toolbar, text=f"{index + 1} · {slot['name']}",
+                                command=lambda selected=index: self.open_debug_terminal(selected))
+            button.pack(side="left", padx=3); self.debug_buttons.append(button)
+            menu = tk.Menu(button, tearoff=False)
+            menu.add_command(label="新开会话", command=lambda selected=index: self.open_debug_terminal(selected, force_new=True))
+            button.bind("<Button-3>", lambda event, popup=menu: popup.tk_popup(event.x_root, event.y_root))
+        ttk.Button(debug_toolbar, text="配置调试窗口", command=self.edit_debug_slots).pack(side="right")
         middle = ttk.Frame(self); middle.grid(row=3, column=0, sticky="nsew")
         middle.columnconfigure(0, weight=1); middle.rowconfigure(0, weight=3); middle.rowconfigure(2, weight=1)
-        self.table = ttk.Treeview(middle, columns=("name", "directory", "delay", "state"), show="headings", height=7, selectmode="browse")
+        self.window_tabs = ttk.Notebook(middle)
+        self.window_tabs.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        self.config_page = ttk.Frame(self.window_tabs)
+        self.manual_page = ttk.Frame(self.window_tabs)
+        self.window_tabs.add(self.config_page, text="配置窗口")
+        self.window_tabs.add(self.manual_page, text="手动终端")
+        for page in (self.config_page, self.manual_page):
+            page.columnconfigure(0, weight=1); page.rowconfigure(0, weight=1)
+        self.window_tabs.bind("<<NotebookTabChanged>>", lambda event: self._update_window_controls())
+        self.table = ttk.Treeview(self.config_page, columns=("name", "directory", "delay", "state"), show="headings", height=7, selectmode="browse")
         for column, label, width in [("name", "窗口", 170), ("directory", "远端工作目录", 390), ("delay", "延迟秒数", 90), ("state", "状态", 130)]:
             self.table.heading(column, text=label); self.table.column(column, width=width, minwidth=60, stretch=column in {"name", "directory"})
         self.table.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(middle, orient="vertical", command=self.table.yview)
+        scrollbar = ttk.Scrollbar(self.config_page, orient="vertical", command=self.table.yview)
         scrollbar.grid(row=0, column=1, sticky="ns"); self.table.configure(yscrollcommand=scrollbar.set)
         self.table.bind("<Double-1>", lambda event: self.edit_profile())
         self.table.bind("<<TreeviewSelect>>", lambda event: self._update_window_controls())
+        self.manual_table = ttk.Treeview(self.manual_page, columns=("name", "directory", "state"),
+                                        show="headings", height=7, selectmode="browse")
+        for column, label, width in [("name", "目标 / 终端", 320), ("directory", "初始目录", 320), ("state", "状态", 150)]:
+            self.manual_table.heading(column, text=label)
+            self.manual_table.column(column, width=width, minwidth=60, stretch=column != "state")
+        self.manual_table.grid(row=0, column=0, sticky="nsew")
+        manual_scrollbar = ttk.Scrollbar(self.manual_page, orient="vertical", command=self.manual_table.yview)
+        manual_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.manual_table.configure(yscrollcommand=manual_scrollbar.set)
+        self.manual_table.bind("<<TreeviewSelect>>", lambda event: self._update_window_controls())
         window_toolbar = ttk.Frame(middle); window_toolbar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 5))
         ttk.Label(window_toolbar, text="运行信息 · 执行中表示命令已开始，不能证明 ROS 节点已就绪").pack(side="left")
         self.remote_terminal_button = ttk.Button(window_toolbar, text="打开远程终端", command=self.open_remote_terminal)
@@ -133,9 +166,9 @@ class App(ttk.Frame):
         self.launch_button.pack(side="right")
         self.close_all_button = ttk.Button(footer, text="一键关闭", command=self.close_all_windows, state="disabled")
         self.close_all_button.pack(side="right", padx=5)
-        self.restart_window_button = ttk.Button(footer, text="重启窗口", command=self.restart_selected_window, state="disabled")
+        self.restart_window_button = ttk.Button(footer, text="重启会话", command=self.restart_selected_window, state="disabled")
         self.restart_window_button.pack(side="right", padx=5)
-        self.close_window_button = ttk.Button(footer, text="关闭窗口", command=self.close_selected_window, state="disabled")
+        self.close_window_button = ttk.Button(footer, text="关闭会话", command=self.close_selected_window, state="disabled")
         self.close_window_button.pack(side="right", padx=5)
 
     def log(self, text):
@@ -297,6 +330,56 @@ class App(ttk.Frame):
             options = dict(self.launcher.connect_options)
             self._work(lambda: preflight(target, password, self.store.known_hosts, **options), lambda result: self.log("SSH连接及密码验证成功"))
 
+    def _refresh_debug_buttons(self):
+        for index, (button, slot) in enumerate(zip(self.debug_buttons, self.debug_slots)):
+            button.configure(text=f"{index + 1} · {slot['name'][:14]}")
+            button.state(["!disabled"] if slot["commands"].strip() and self.selected_profile() and not self.busy else ["disabled"])
+
+    def save_debug_slots(self, slots):
+        updated = dict(self.preferences, **debug_preferences(slots))
+        self.store.save_preferences(updated)
+        self.preferences = updated; self.debug_slots = debug_slots(updated)
+        self._refresh_debug_buttons(); self.log("四个特别调试槽位已保存，所有目标共用")
+
+    def edit_debug_slots(self):
+        DebugSlotsEditor(self.root, self.debug_slots, self.save_debug_slots)
+
+    def _manual_window_opened(self, identifier, message):
+        self._sync_remote_windows(self.launcher.poll())
+        self.window_tabs.select(self.manual_page)
+        if self.manual_table.exists(identifier):
+            self.manual_table.selection_set(identifier); self.manual_table.see(identifier)
+            self.log(message)
+        else: self.log("远程终端已关闭或未能打开")
+
+    def open_debug_terminal(self, index, force_new=False):
+        if self.busy: return
+        try:
+            slot = dict(self.debug_slots[index]); profile = self.selected_profile()
+            if not slot["commands"].strip(): raise ValueError("请先配置该调试槽位的命令")
+            if profile is None: raise ValueError("请选择启动配置，以继承公共初始化")
+            check_terminal()
+            target = self.save_target(quiet=True); password = self.password.get()
+            existing = None if force_new else self.launcher.find_debug_terminal(target, slot, index)
+            if not password and existing is None: raise ValueError("请输入SSH密码")
+        except (ValueError, OSError, RuntimeError) as exc:
+            messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
+        operation_epoch = self.launcher.control_epoch
+        self.log(f"正在打开调试会话：{slot['name']}……")
+        def opened(identifier):
+            self._manual_window_opened(identifier, "已复用已有调试会话" if existing == identifier else "特别调试窗口已打开")
+        def open_or_reuse():
+            identifier = self.launcher.open_debug_terminal(target, password, profile, slot, slot_index=index,
+                                                          force_new=force_new, expected_epoch=operation_epoch)
+            if existing == identifier:
+                focused = self.launcher.focus_window(identifier)
+                return identifier, focused
+            return identifier, True
+        def complete(result):
+            identifier, focused = result; opened(identifier)
+            if not focused: self.log("已复用并选中会话；桌面未允许自动聚焦，请在开发板终端切换到对应标签页")
+        self._work(open_or_reuse, complete)
+
     def open_remote_terminal(self):
         if self.busy: return
         try:
@@ -308,19 +391,26 @@ class App(ttk.Frame):
         self.log("正在验证SSH连接并打开远程终端……")
         operation_epoch = self.launcher.control_epoch
         def opened(identifier):
-            self._sync_remote_windows(self.launcher.poll())
-            self.table.selection_set(identifier); self.table.see(identifier)
-            self.log("远程终端已打开，可在新窗口中手动输入命令")
+            self._manual_window_opened(identifier, "远程终端已打开，可在新窗口中手动输入命令")
         profile = self.selected_profile()
         self._work(lambda: self.launcher.open_remote_terminal(target, password, profile=profile, expected_epoch=operation_epoch), opened)
 
     def _sync_remote_windows(self, tasks):
-        for identifier, task in tasks.items():
-            if task.get("mode") == "shell" and not self.table.exists(identifier):
-                self.table.insert("", "end", iid=identifier, values=(task["name"], "继承公共初始化目录" if task.get("inherits_init") else "远端登录目录", 0,
-                                  STATE_NAMES.get(task["state"], task["state"])))
+        live = {identifier: task for identifier, task in tasks.items() if task.get("mode") == "shell"}
+        previous = set(self.manual_table.get_children())
+        for identifier in previous - live.keys(): self.manual_table.delete(identifier)
+        for key in list(self.last_states):
+            if key[1] in previous and (key[1] not in live or key[0] != live[key[1]].get("session_id")):
+                del self.last_states[key]
+        for identifier, task in live.items():
+            state = STATE_NAMES.get(task["state"], task["state"])
+            if task.get("exit_code") is not None: state += f" ({task['exit_code']})"
+            values = (task["name"], "继承公共初始化目录" if task.get("inherits_init") else "远端登录目录", state)
+            if self.manual_table.exists(identifier): self.manual_table.item(identifier, values=values)
+            else: self.manual_table.insert("", "end", iid=identifier, values=values)
 
     def _selected_config_window(self):
+        if self.window_tabs.select() != str(self.config_page): return None
         selected = self.table.selection(); profile = self.selected_profile()
         if selected and profile:
             return next((w for w in profile["windows"] if w["id"] == selected[0]), None)
@@ -347,15 +437,19 @@ class App(ttk.Frame):
                                                      expected_epoch=operation_epoch), started)
 
     def _selected_run_window(self):
+        if self.window_tabs.select() == str(self.manual_page):
+            selected = self.manual_table.selection()
+            return selected[0] if selected and selected[0] in self.launcher.shell_tasks else None
         profile = self.selected_profile(); selected = self.table.selection()
-        if selected and selected[0] in self.launcher.shell_tasks: return selected[0]
         if profile and profile["id"] == self.launcher.profile_id and selected and selected[0] in self.launcher.tasks:
             return selected[0]
         return None
 
     def _update_window_controls(self):
+        self._refresh_debug_buttons()
         identifier = self._selected_run_window()
         tasks = self.launcher.poll()
+        self._sync_remote_windows(tasks)
         state = tasks.get(identifier, {}).get("state") if identifier else None
         window = self._selected_config_window(); profile = self.selected_profile()
         current_task = tasks.get(window["id"]) if window and profile and profile["id"] == self.launcher.profile_id else None
@@ -366,7 +460,7 @@ class App(ttk.Frame):
         self.start_window_button.state(["!disabled"] if can_start else ["disabled"])
         self.remote_terminal_button.state(["disabled"] if self.busy else ["!disabled"])
         self.close_window_button.state(["!disabled"] if state and state not in {"closing", "closed"} else ["disabled"])
-        self.restart_window_button.state(["!disabled"] if identifier and state != "closing" and not self.busy else ["disabled"])
+        self.restart_window_button.state(["!disabled"] if identifier and state and state != "closing" and not self.busy else ["disabled"])
         self.close_all_button.state(["!disabled"] if self.busy or self.launcher.all_tasks() else ["disabled"])
 
     def close_selected_window(self):
@@ -450,7 +544,7 @@ class App(ttk.Frame):
         for identifier, task in tasks.items():
             state = STATE_NAMES.get(task["state"], task["state"])
             if task.get("exit_code") is not None: state += f" ({task['exit_code']})"
-            if self.table.exists(identifier) and (task.get("mode") == "shell" or (profile and profile["id"] == self.launcher.profile_id)):
+            if task.get("mode") != "shell" and self.table.exists(identifier) and profile and profile["id"] == self.launcher.profile_id:
                 self.table.set(identifier, "state", state)
             signature = (task["state"], task.get("exit_code"), task.get("error"))
             session_id = task.get("session_id", self.launcher.run_id)
