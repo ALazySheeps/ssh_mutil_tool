@@ -53,13 +53,18 @@ class GuiTests(unittest.TestCase):
             app._poll(); time.sleep(.01)
         self.assertEqual(len(calls), 1)
         identifier = next(iter(app.launcher.shell_tasks))
-        self.assertTrue(app.table.exists(identifier))
-        app.refresh_profiles(); self.assertTrue(app.table.exists(identifier))
-        app.table.selection_set(identifier); app._update_window_controls()
+        self.assertFalse(app.table.exists(identifier))
+        self.assertTrue(app.manual_table.exists(identifier))
+        app.refresh_profiles(); self.assertTrue(app.manual_table.exists(identifier))
+        app.window_tabs.select(app.manual_page)
+        app.manual_table.selection_set(identifier); app._update_window_controls()
         self.assertTrue(app.close_window_button.instate(["!disabled"]))
         self.assertTrue(app.restart_window_button.instate(["!disabled"]))
         app.close_selected_window()
-        self.assertEqual(app.launcher.poll()[identifier]["state"], "closed")
+        self.assertNotIn(identifier, app.launcher.poll())
+        app._poll()
+        self.assertFalse(app.manual_table.exists(identifier))
+        self.assertTrue(app.table.exists("a"))
         self.assertTrue(app.remote_terminal_button.instate(["!disabled"]))
 
     def test_start_selected_window_and_disable_duplicate_launch(self):
@@ -96,7 +101,104 @@ class GuiTests(unittest.TestCase):
             app._poll(); time.sleep(.01)
         spec = next(iter(app.launcher.shell_specs.values()))
         self.assertEqual(spec['profile']['common_init'], app.selected_profile()['common_init'])
-        self.assertEqual(app.table.item(next(iter(app.launcher.shell_tasks)), 'values')[1], '继承公共初始化目录')
+        self.assertEqual(app.manual_table.item(next(iter(app.launcher.shell_tasks)), 'values')[1], '继承公共初始化目录')
+
+    def test_manual_tab_actions_and_close_all_preserve_configuration_rows(self):
+        app = App(self.root, self.store)
+        app.launcher = Launcher(self.store.known_hosts, preflight_fn=lambda *a, **kw: None, open_fn=lambda *a: None)
+        self.addCleanup(app.launcher.close)
+        target = {'id': app.target_id, 'name': 'T', 'host': 'localhost', 'port': 22, 'username': 'u'}
+        app.launcher.start_window(target, 'secret', app.selected_profile(), 'a')
+        first = app.launcher.open_remote_terminal(target, 'secret')
+        second = app.launcher.open_remote_terminal(target, 'secret')
+        app._poll()
+        self.assertEqual([app.window_tabs.tab(tab, 'text') for tab in app.window_tabs.tabs()], ['配置窗口', '手动终端'])
+        self.assertEqual(set(app.table.get_children()), {'a'})
+        self.assertEqual(set(app.manual_table.get_children()), {first, second})
+        app.table.selection_set('a'); app.manual_table.selection_set(first)
+        app.window_tabs.select(app.manual_page); app._update_window_controls()
+        self.assertTrue(app.start_window_button.instate(['disabled']))
+        app.close_selected_window(); app._poll()
+        self.assertFalse(app.manual_table.exists(first))
+        self.assertTrue(app.manual_table.exists(second))
+        self.assertEqual(app.launcher.tasks['a']['state'], 'opening')
+        app.close_all_button.invoke(); app._poll()
+        self.assertEqual(app.manual_table.get_children(), ())
+        self.assertEqual(app.launcher.shell_specs, {})
+        self.assertTrue(app.table.exists('a'))
+        self.assertEqual(app.table.set('a', 'state'), '已关闭')
+
+    def test_debug_buttons_save_and_launch_current_global_config(self):
+        app = App(self.root, self.store); calls = []
+        app.launcher = Launcher(self.store.known_hosts, preflight_fn=lambda *a, **kw: None,
+                                open_fn=lambda *a: calls.append(a))
+        self.addCleanup(app.launcher.close)
+        self.assertEqual(len(app.debug_buttons), 4)
+        self.assertEqual(app.debug_slots[0]['commands'], 'htop')
+        self.assertTrue(app.debug_buttons[1].instate(['disabled']))
+        slots = [dict(slot) for slot in app.debug_slots]
+        slots[1] = {'name': '进程', 'commands': 'ps aux'}
+        app.save_debug_slots(slots)
+        from ssh_multi_tool.settings import debug_slots
+        self.assertEqual(debug_slots(self.store.preferences()), slots)
+        self.assertEqual(self.store.load_profile('demo'), profile())
+        for key, value in {'name': 'T', 'host': 'localhost', 'port': '22', 'username': 'u'}.items():
+            app.target_vars[key].set(value)
+        app.password.set('secret')
+        with patch('ssh_multi_tool.gui.check_terminal'): app.debug_buttons[1].invoke()
+        deadline = time.monotonic() + 2
+        while app.busy:
+            self.assertLess(time.monotonic(), deadline)
+            app._poll(); time.sleep(.01)
+        self.assertEqual(len(calls), 1)
+        identifier = next(iter(app.launcher.shell_specs)); spec = app.launcher.shell_specs[identifier]
+        self.assertEqual(spec['debug_slot'], slots[1])
+        self.assertEqual(spec['profile']['common_init'], app.selected_profile()['common_init'])
+        self.assertEqual(app.window_tabs.select(), str(app.manual_page))
+        self.assertTrue(app.manual_table.exists(identifier))
+
+    def test_debug_slot_save_failure_preserves_previous_settings(self):
+        app = App(self.root, self.store); self.addCleanup(app.launcher.close)
+        previous = [dict(slot) for slot in app.debug_slots]
+        slots = [dict(slot) for slot in previous]; slots[0]['commands'] = 'new-command'
+        with patch.object(self.store, 'save_preferences', side_effect=OSError('disk')):
+            with self.assertRaises(OSError): app.save_debug_slots(slots)
+        self.assertEqual(app.debug_slots, previous)
+
+    def test_debug_editor_saves_four_names_and_multiline_commands(self):
+        from ssh_multi_tool.debug_editor import DebugSlotsEditor
+        from ssh_multi_tool.settings import debug_slots
+        results = []; editor = DebugSlotsEditor(self.root, debug_slots({}), results.append)
+        editor.names[2].set('日志')
+        editor.commands[2].insert('1.0', 'echo first\necho second')
+        self.assertTrue(editor._save())
+        self.assertEqual(len(results[0]), 4)
+        self.assertEqual(results[0][2], {'name': '日志', 'commands': 'echo first\necho second'})
+
+    def test_debug_button_reuses_session_without_password_and_can_force_new(self):
+        app = App(self.root, self.store); calls = []
+        app.launcher = Launcher(self.store.known_hosts, preflight_fn=lambda *a, **kw: None,
+                                open_fn=lambda *a: calls.append(a))
+        self.addCleanup(app.launcher.close)
+        for key, value in {'name': 'T', 'host': 'localhost', 'port': '22', 'username': 'u'}.items():
+            app.target_vars[key].set(value)
+        def finish():
+            deadline = time.monotonic() + 2
+            while app.busy:
+                self.assertLess(time.monotonic(), deadline)
+                app._poll(); time.sleep(.01)
+        app.password.set('secret')
+        with patch('ssh_multi_tool.gui.check_terminal'): app.debug_buttons[0].invoke()
+        finish(); identifier = next(iter(app.launcher.shell_tasks))
+        app.password.set('')
+        with patch('ssh_multi_tool.gui.check_terminal'), patch.object(app.launcher, 'focus_window', return_value=True) as focus:
+            app.debug_buttons[0].invoke(); finish()
+            focus.assert_called_once_with(identifier)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(app.manual_table.selection(), (identifier,))
+        app.password.set('secret')
+        with patch('ssh_multi_tool.gui.check_terminal'): app.open_debug_terminal(0, force_new=True)
+        finish(); self.assertEqual(len(calls), 2)
 
     def test_restores_nonfirst_profile_without_overwriting_selection(self):
         second = profile(); second.update(id="z-second", name="Second")
