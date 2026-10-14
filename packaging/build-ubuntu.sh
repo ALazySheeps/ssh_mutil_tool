@@ -10,8 +10,10 @@ if [[ ! -x .build-venv/bin/python ]]; then python3 -m venv .build-venv; fi
 .build-venv/bin/python -m pip install --timeout 120 --retries 5 -r requirements.txt 'pyinstaller>=6,<7'
 .build-venv/bin/python -m unittest discover -s tests -v
 .build-venv/bin/python -m PyInstaller --noconfirm --clean --onedir --console \
-  --name ssh-multi-tool --collect-all paramiko --add-data 'examples:examples' run.py
+  --name ssh-multi-tool --collect-all paramiko --add-data 'examples:examples' \
+  --add-data 'ssh_multi_tool/assets:ssh_multi_tool/assets' run.py
 cp README.md LICENSE dist/ssh-multi-tool/
+cp ssh_multi_tool/assets/app-icon.svg dist/ssh-multi-tool/app-icon.svg
 cp docs/quickstart.md dist/ssh-multi-tool/QUICKSTART.md
 cp docs/verification.md dist/ssh-multi-tool/VERIFICATION.md
 .build-venv/bin/python packaging/licenses.py dist/ssh-multi-tool/THIRD_PARTY_LICENSES

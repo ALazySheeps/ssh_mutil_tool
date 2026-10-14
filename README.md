@@ -130,6 +130,14 @@ bash packaging/build-ubuntu.sh
 
 构建脚本收集第三方许可证，缺失时停止并要求补齐。构建通过不等于可发布，Ubuntu22.04和24.04应分别按[验证清单](docs/verification.md)验收。
 
+## 应用图标
+
+项目自带原创 SVG 图标和 16–512 像素 PNG；窗口使用多个尺寸的内置 PNG，源码启动、Python wheel 安装和 Ubuntu 分发包均包含资源，不依赖当前工作目录或额外图像库。桌面入口使用 `Sshmultitool` 窗口标识匹配应用，图标安装到当前用户的标准 `hicolor` 目录。
+
+源码用户可运行 `bash packaging/install-desktop.sh` 安装或更新应用菜单入口；Ubuntu 分发包仍运行解压目录中的 `bash install-desktop.sh`。已经安装旧入口的用户需要重新执行一次该脚本，并关闭旧窗口再启动。程序目录移动后也需重新安装入口。
+
+图标源文件位于 `ssh_multi_tool/assets/app-icon.svg`。维护者安装 `python3-gi python3-cairo gir1.2-rsvg-2.0` 后，可运行 `python3 packaging/render-icon.py` 重新生成 PNG；这些依赖仅用于修改图标，用户运行应用无需安装。
+
 ## 文档
 
 - [快速入门](docs/quickstart.md)
