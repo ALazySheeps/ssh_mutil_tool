@@ -17,5 +17,8 @@ ssh-multi-tool = "ssh_multi_tool.__main__:main"
 [tool.setuptools]
 packages = ["ssh_multi_tool"]
 
+[tool.setuptools.package-data]
+ssh_multi_tool = ["assets/*.svg", "assets/*.png"]
+
 [tool.setuptools.data-files]
 "share/ssh-multi-tool/examples" = ["examples/rdkx5.json", "examples/smoke-test.json"]

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">SSH Multi Tool</title>
+  <desc id="desc">Three terminal cards and a connected node on a midnight blue tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#19334F"/>
+      <stop offset="1" stop-color="#0B1628"/>
+    </linearGradient>
+    <linearGradient id="terminal" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#1D3953"/>
+      <stop offset="1" stop-color="#10283F"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#tile)"/>
+  <rect x="17" y="17" width="478" height="478" rx="107" fill="none" stroke="#31516A" stroke-width="2"/>
+  <rect x="146" y="94" width="280" height="210" rx="29" fill="#233F59" stroke="#52708B" stroke-width="14"/>
+  <rect x="112" y="130" width="280" height="210" rx="29" fill="#1B354E" stroke="#7494AB" stroke-width="14"/>
+  <rect x="76" y="166" width="280" height="210" rx="29" fill="url(#terminal)" stroke="#D7EDF3" stroke-width="14"/>
+  <path d="M83 214H349" fill="none" stroke="#D7EDF3" stroke-width="10"/>
+  <circle cx="109" cy="191" r="7" fill="#2EE5BF"/>
+  <circle cx="133" cy="191" r="7" fill="#6E98AD"/>
+  <circle cx="157" cy="191" r="7" fill="#6E98AD"/>
+  <path d="M125 256L161 285L125 314" fill="none" stroke="#2EE5BF" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M197 316H254" fill="none" stroke="#2EE5BF" stroke-width="20" stroke-linecap="round"/>
+  <path d="M300 376V408H373" fill="none" stroke="#2EE5BF" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="401" cy="408" r="29" fill="#0C2032" stroke="#2EE5BF" stroke-width="14"/>
+  <circle cx="401" cy="408" r="9" fill="#2EE5BF"/>
+</svg>

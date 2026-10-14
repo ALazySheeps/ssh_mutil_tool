@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "id": "8b01b4c92e8e48678913884f4d31c4b4",
-  "name": "球包车demo",
+  "id": "2c4a5064dfd744e78084d99816cab908",
+  "name": "球包车demo启动优化",
   "description": "",
   "common_init": "source /opt/tros/humble/setup.bash",
   "windows": [
@@ -14,6 +14,30 @@
       "start_delay_seconds": 0.0
     },
     {
+      "id": "fd633239cd2342968a69d7d5afd3af7b",
+      "name": "点云转换",
+      "enabled": true,
+      "working_directory": "/home/sunrise/binocular_dinner",
+      "commands": "source install-rdk/setup.bash\nros2 launch pointcloud_transformer pointcloud_transformer.launch.py",
+      "start_delay_seconds": 10.0
+    },
+    {
+      "id": "78e3cb6ac7b44ee7a73ab1d11ca61549",
+      "name": "导航",
+      "enabled": true,
+      "working_directory": "",
+      "commands": "source /home/sunrise/zx/code/work/install/setup.bash\nros2 launch autonomous_bringup algorithm_only.launch.py \\\nconfig_file:=/home/sunrise/zx/code/work/install/autonomous_bringup/share/autonomous_bringup/config/odin1_real.yaml",
+      "start_delay_seconds": 10.0
+    },
+    {
+      "id": "fa864ba6b4d344b4b836c17550f811a2",
+      "name": "reid",
+      "enabled": true,
+      "working_directory": "/root/reid",
+      "commands": "./start_stereo_sub.sh",
+      "start_delay_seconds": 15.0
+    },
+    {
       "id": "58a935ad75d648ff9ae45dfc0e033362",
       "name": "延迟启动imu",
       "enabled": true,
@@ -22,36 +46,12 @@
       "start_delay_seconds": 20.0
     },
     {
-      "id": "fd633239cd2342968a69d7d5afd3af7b",
-      "name": "点云转换",
-      "enabled": true,
-      "working_directory": "/home/sunrise/binocular_dinner",
-      "commands": "source install-rdk/setup.bash\nros2 launch pointcloud_transformer pointcloud_transformer.launch.py",
-      "start_delay_seconds": 20.0
-    },
-    {
-      "id": "78e3cb6ac7b44ee7a73ab1d11ca61549",
-      "name": "导航",
-      "enabled": true,
-      "working_directory": "",
-      "commands": "source /home/sunrise/zx/code/work/install/setup.bash\nros2 launch autonomous_bringup algorithm_only.launch.py \\\nconfig_file:=/home/sunrise/zx/code/work/install/autonomous_bringup/share/autonomous_bringup/config/odin1_real.yaml",
-      "start_delay_seconds": 30.0
-    },
-    {
-      "id": "fa864ba6b4d344b4b836c17550f811a2",
-      "name": "reid",
-      "enabled": true,
-      "working_directory": "/root/reid",
-      "commands": "./start_stereo_sub.sh",
-      "start_delay_seconds": 40.0
-    },
-    {
       "id": "5a1ef48419534ee2a74a670103ae915b",
       "name": "跟随节点1",
       "enabled": true,
       "working_directory": "/root/control",
       "commands": "source /home/sunrise/ros2_ws/install/setup.bash 2>/dev/null\npython3 uwb_follow_node.py \\\n  --ros-args -p follow_topic:=/cmd_vel_follow \\\n  --params-file /root/control/follow_params.yaml",
-      "start_delay_seconds": 50.0
+      "start_delay_seconds": 25.0
     },
     {
       "id": "6b7d575bc88647c78ea748dbcffe8f3f",
@@ -59,7 +59,7 @@
       "enabled": true,
       "working_directory": "/root/control",
       "commands": "source /home/sunrise/ros2_ws/install/setup.bash 2>/dev/null\npython3 owner_waypoint_node.py \\\n  --ros-args --params-file /root/control/owner_waypoint.yaml",
-      "start_delay_seconds": 50.0
+      "start_delay_seconds": 25.0
     },
     {
       "id": "62458a5e06f34c68acebbdad40b3a459",
@@ -67,7 +67,7 @@
       "enabled": true,
       "working_directory": "/home/sunrise/binocular_dinner",
       "commands": "source install-rdk/setup.bash\nros2 run vins vins_node  install-rdk/vins/share/vins/config/stereo_imu/icango_stereonet_640x352_config.yaml",
-      "start_delay_seconds": 60.0
+      "start_delay_seconds": 30.0
     },
     {
       "id": "f92b760b345842459e8063844ab032f2",
@@ -75,7 +75,7 @@
       "enabled": true,
       "working_directory": "/root/control",
       "commands": "python3 cmd_vel_node.py",
-      "start_delay_seconds": 70.0
+      "start_delay_seconds": 30.0
     }
   ]
 }
