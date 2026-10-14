@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .editor import ProfileEditor
 from .debug_editor import DebugSlotsEditor
+from .icons import WINDOW_CLASS, apply_window_icon
 from .launcher import FINAL, Launcher
 from .models import validate_profile, validate_target
 from .ssh import UnknownHost, error_text, inspect_host, preflight, trust_host
@@ -44,6 +45,7 @@ class App(ttk.Frame):
         self.debug_slots = debug_slots({})
         self.keep_alive = tk.BooleanVar(value=False)
         self._build()
+        self._window_icons = apply_window_icon(self.root)
         try: self.preferences = self.store.preferences()
         except (ValueError, OSError) as exc: self.preferences = {}; self.log(f"偏好恢复失败：{exc}")
         self.debug_slots = debug_slots(self.preferences)
@@ -651,4 +653,4 @@ class App(ttk.Frame):
 
 
 def main():
-    root = tk.Tk(); App(root); root.mainloop()
+    root = tk.Tk(className=WINDOW_CLASS); App(root); root.mainloop()
