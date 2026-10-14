@@ -7,13 +7,20 @@ icon_directory="$data_root/icons/hicolor/scalable/apps"
 
 # Escape both the Exec argument and the surrounding desktop-entry string layer.
 escape_exec() {
-  local escaped="$1"
-  escaped="${escaped//\\/\\\\}"
-  escaped="${escaped//\"/\\\"}"
-  escaped="${escaped//\`/\\\`}"
-  escaped="${escaped//\$/\\\$}"
-  escaped="${escaped//%/%%}"
-  escaped="${escaped//\\/\\\\}"
+  local input="$1" escaped="" character index
+  for ((index=0; index<${#input}; index++)); do
+    character="${input:index:1}"
+    case "$character" in
+      '\') escaped+='\\\\' ;;
+      '"') escaped+='\"' ;;
+      '$'|'`') escaped+='\\'; escaped+="$character" ;;
+      '%') escaped+='%%' ;;
+      $'\n') escaped+='\n' ;;
+      $'\r') escaped+='\r' ;;
+      $'\t') escaped+='\t' ;;
+      *) escaped+="$character" ;;
+    esac
+  done
   printf '"%s"' "$escaped"
 }
 

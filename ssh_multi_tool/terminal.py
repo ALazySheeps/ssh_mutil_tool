@@ -4,9 +4,10 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import List
 
 
-def helper_argv(socket_path: str, token: str) -> list[str]:
+def helper_argv(socket_path: str, token: str) -> List[str]:
     if getattr(sys, "frozen", False):
         prefix = [sys.executable]
     else:
@@ -15,7 +16,7 @@ def helper_argv(socket_path: str, token: str) -> list[str]:
     return prefix + ["--helper", "--socket", socket_path, "--token", token]
 
 
-def terminal_argv(helper_args: list[str], title: str) -> list[str]:
+def terminal_argv(helper_args: List[str], title: str) -> List[str]:
     return ["gnome-terminal", "--window", "--title", title, "--", *helper_args]
 
 

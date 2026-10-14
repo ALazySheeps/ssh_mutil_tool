@@ -208,6 +208,7 @@ class App(ttk.Frame):
         else: self.new_target()
 
     def _target_selected(self):
+        if not self.targets or not self.target_combo.get(): return
         index = self.target_combo.current()
         if index < 0: return
         target = self.targets[index]
@@ -246,6 +247,7 @@ class App(ttk.Frame):
         except (ValueError, OSError) as exc: messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root)
 
     def selected_profile(self):
+        if not self.profiles or not self.profile_combo.get(): return None
         index = self.profile_combo.current()
         return self.profiles[index] if 0 <= index < len(self.profiles) else None
 

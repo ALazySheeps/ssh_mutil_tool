@@ -1,0 +1,54 @@
+name: Ubuntu and Python compatibility
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb xauth x11-utils tmux desktop-file-utils python3-gi gnome-terminal libglib2.0-bin fonts-noto-cjk
+      - run: python -m pip install --upgrade 'pip>=23.1' && python -m pip install .
+      - run: xvfb-run -a python -c "import tkinter; root=tkinter.Tk(); root.destroy()"
+      - run: xvfb-run -a python -m unittest discover -s tests -v
+      - name: Check installed package outside source tree
+        run: cd /tmp && python -c "from ssh_multi_tool import gui, icons; from pkgutil import get_data; assert get_data('ssh_multi_tool', 'assets/app-icon-256.png')"
+  ubuntu:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['20.04', '22.04', '24.04', '26.04']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test distribution Python and native desktop libraries
+        run: |
+          docker run --rm -v "$PWD:/src:ro" ubuntu:${{ matrix.ubuntu }} bash -ec '
+            export DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 XDG_RUNTIME_DIR=/tmp/sshmt-runtime
+            mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+            apt-get update -qq
+            apt-get install -y python3 python3-tk python3-venv xvfb xauth x11-utils tmux desktop-file-utils python3-gi gnome-terminal libglib2.0-bin fonts-noto-cjk dbus-x11
+            cd /tmp
+            cp -a /src project
+            cd project
+            bash install-ubuntu.sh
+            xvfb-run -a .venv/bin/python -m unittest discover -s tests -v
+            xvfb-run -a dbus-run-session -- .venv/bin/python packaging/check-terminal.py
+            if [ "${{ matrix.ubuntu }}" = "20.04" ]; then
+              apt-get install -y binutils libpython3-dev
+              xvfb-run -a bash packaging/build-ubuntu.sh
+              status=0
+              xvfb-run -a timeout 4 dist/ssh-multi-tool/ssh-multi-tool || status=$?
+              test "$status" -eq 124
+            fi
+            .venv/bin/python -m pip install .
+            cd /tmp
+            /tmp/project/.venv/bin/python -c "from ssh_multi_tool import gui; from pkgutil import get_data; assert get_data(\"ssh_multi_tool\", \"assets/app-icon-256.png\")"
+          '

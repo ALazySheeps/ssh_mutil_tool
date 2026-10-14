@@ -1,5 +1,7 @@
 # 验证记录与 Ubuntu 发布验收
 
+前半部分保留 2026-10-11 的历史验收记录；最新兼容性验证见本文件末尾。
+
 验证日期：2026年10月11日。开发主机为Windows；Python3.13隔离环境、Paramiko4.0.0、Tk8.6；另有Ubuntu24.04.4 WSL2、Python3.12.3、glibc2.39。Windows Bash语义测试使用MSYS Bash5.3，Linux测试使用Ubuntu原生Bash及PTY。
 
 ## 自动化测试
@@ -35,3 +37,26 @@ Ubuntu24.04 WSL最终自动化运行共47项，全部通过、无跳过。Window
 已在Ubuntu24.04 WSL完成PyInstaller6.22.3目录模式构建、依赖及原生系统库许可证收集。冻结包的命令行、GUI进程及helper入口验证通过，helper能脱离外部Paramiko安装处理通信失败。该环境缺少GNOME Terminal，无法执行真实多窗口启动。Ubuntu22.04未验证，测试包不宣称兼容22.04。
 
 真实Ubuntu桌面、RDK X5程序、交互sudo、缩放、断线和六窗口长期性能仍未验收，不能将测试包标为已完成正式平台发布验收。
+
+## 2026-10-14 Ubuntu / Python 兼容性验证
+
+分支：`feat/ubuntu-python-compat`。源码支持范围及安装、构建限制见[兼容性说明](compatibility.md)。
+
+| 环境 | Python | 完整自动测试 |
+| --- | --- | --- |
+| Ubuntu 20.04 官方容器，系统 Tk 8.6，Xvfb | 3.8.10 | 141 项通过，无跳过 |
+| Ubuntu 22.04 开发主机，系统 Tk 8.6 | 3.10.12 | 141 项通过，无跳过 |
+| Ubuntu 24.04 官方容器，系统 Tk，Xvfb | 3.12.3 | 141 项通过，无跳过 |
+| Ubuntu 26.04 官方容器，系统 Tk，Xvfb | 3.14.4 | 141 项通过，无跳过 |
+| Ubuntu 22.04 隔离解释器，Tk 8.6 | 3.9.25 | 141 项通过，无跳过 |
+| Ubuntu 22.04 隔离解释器，Tk 9 | 3.11.15、3.12.13、3.13.15、3.14.7 | 各 141 项通过，无跳过 |
+
+测试命令为 `python -m unittest discover -s tests -v`，容器加 `xvfb-run -a`。含实际 SSH 通道、Linux PTY、真实 tmux 保活/重连/关闭、GUI、进程回收、原生 X11 图标及 Gio 桌面入口启动。Ubuntu 22.04 的 tmux 测试使用临时提取的 tmux 二进制；容器使用发行版 tmux。
+
+另外，Ubuntu 20.04 / 22.04 的真实 GNOME Terminal 冒烟检查通过：两标签页正常创建和管理，短命令结束后标签页移除。Ubuntu 20.04 验证了 `install-ubuntu.sh` 从空环境安装、wheel 安装及项目外资源读取；3.8/3.9/3.11/3.12/3.13/3.14 的额外隔离环境也通过 wheel 安装与项目外 GUI 模块/内置图标读取。安装脚本拒绝混用既有虚拟环境与不同版本 Python 的检查通过。
+
+Ubuntu 20.04 / Python 3.8 完成 PyInstaller 目录式构建、第三方许可证收集及打包。冻结 GUI 在 Xvfb 下保持运行至 4 秒超时，从项目目录外启动后原生窗口的 256 像素图标及 `WM_CLASS=Sshmultitool` 检查通过。未将该包作为跨 Ubuntu 通用发行包发布。
+
+CI 定义增加了 CPython 3.8–3.14 和 Ubuntu 20.04/22.04/24.04/26.04 两组独立矩阵；本次在本地执行上述验证，尚未触发远端 GitHub Actions。YAML、Bash 语法、源码编译及差异空白检查通过。原 GUI 文件的 CRLF 保持不变，差异检查使用 `core.whitespace=cr-at-eol`。
+
+这些结果不等同于所有 Python × Ubuntu 组合均已逐一测试，也不代替 Wayland 桌面、RDK X5 实际业务、断网及长期运行验收。源码兼容范围不代表原 Ubuntu 24.04 冻结包可以运行在较旧 Ubuntu。

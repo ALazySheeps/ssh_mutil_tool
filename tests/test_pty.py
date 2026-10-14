@@ -47,7 +47,8 @@ class PtyTests(unittest.TestCase):
                 if done: status = result
             self.assertIsNotNone(status, "PTY command must terminate before timeout")
             output.extend(parser.finish())
-            return os.waitstatus_to_exitcode(status), bytes(output).replace(b"\r\n", b"\n"), phases
+            code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -os.WTERMSIG(status)
+            return code, bytes(output).replace(b"\r\n", b"\n"), phases
         finally:
             os.close(fd)
             if status is None:

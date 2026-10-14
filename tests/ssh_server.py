@@ -10,6 +10,17 @@ import paramiko
 logging.getLogger("paramiko").addHandler(logging.NullHandler())
 
 
+class AcknowledgingTransport(paramiko.Transport):
+    """Do not finish a shell before SSH has acknowledged its request."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs); self.request_acknowledged = threading.Event()
+
+    def _send_user_message(self, message):
+        super()._send_user_message(message)
+        if message.asbytes()[:1] == paramiko.common.cMSG_CHANNEL_SUCCESS:
+            self.request_acknowledged.set()
+
+
 class Server(paramiko.ServerInterface):
     def __init__(self, owner): self.owner = owner
     def check_auth_password(self, username, password):
@@ -22,6 +33,7 @@ class Server(paramiko.ServerInterface):
     def check_channel_window_change_request(self, channel, width, height, pixelwidth, pixelheight):
         self.owner.sizes.append((width, height)); return True
     def check_channel_shell_request(self, channel):
+        channel.transport.request_acknowledged.clear()
         threading.Thread(target=self.owner.shell, args=(channel,), daemon=True).start()
         return True
     def check_channel_exec_request(self, channel, command):
@@ -48,7 +60,7 @@ class SSHServer:
             try: connection, _ = self.listener.accept()
             except socket.timeout: continue
             except OSError: break
-            transport = paramiko.Transport(connection, default_window_size=32768); self.transports.append(transport)
+            transport = AcknowledgingTransport(connection, default_window_size=32768); self.transports.append(transport)
             transport.add_server_key(self.key)
             try: transport.start_server(server=Server(self))
             except (EOFError, OSError, paramiko.SSHException): transport.close()
@@ -73,6 +85,7 @@ class SSHServer:
         channel.close()
 
     def shell(self, channel):
+        channel.transport.request_acknowledged.wait(2)
         try:
             channel.sendall(self.output)
             if self.hold:
