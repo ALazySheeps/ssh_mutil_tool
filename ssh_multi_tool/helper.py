@@ -11,6 +11,7 @@ import threading
 from .broker import request
 from .ssh import connect, error_text
 from .reporting import Reporter
+from .tmux import build_tmux_script
 
 
 class PhaseParser:
@@ -64,9 +65,12 @@ def run_session(snapshot, events, *, output=None, interactive=True, stop=None):
     output = output or sys.stdout.buffer
     client = None; channel = None; old_settings = None
     input_fd = None; previous_size = None; started = False; pending = bytearray()
-    shell = snapshot.get("mode") == "shell" and not snapshot["script"]
+    shell = snapshot.get("mode") == "shell" and not snapshot["script"] and not snapshot.get("tmux_session")
     parser = PhaseParser(snapshot["marker"])
-    script = snapshot["script"].encode("utf-8")
+    script_text = snapshot["script"]
+    if snapshot.get("tmux_session"):
+        script_text = build_tmux_script(script_text, snapshot["tmux_session"], snapshot["marker"], attach_only=snapshot.get("tmux_attach_only", False))
+    script = script_text.encode("utf-8")
     def event(state, **extra): events({"state": state, **extra})
     if stop is not None and stop.is_set():
         event("closed"); return 0
@@ -169,7 +173,10 @@ def helper_main(socket_path, token):
         try: result = run_session(snapshot, events, stop=stop)
         finally: reporter.close()
         if not stop.is_set():
-            print(f"\n任务已结束，退出码：{result}。\n按回车关闭此窗口……", flush=True)
+            if snapshot.get("tmux_session"):
+                print(f"\n保活终端连接已结束，退出码：{result}。远端tmux会话可能仍在运行。\n按回车关闭此窗口……", flush=True)
+            else:
+                print(f"\n任务已结束，退出码：{result}。\n按回车关闭此窗口……", flush=True)
             while not stop.is_set():
                 ready, _, _ = select.select([sys.stdin], [], [], .1)
                 if ready:

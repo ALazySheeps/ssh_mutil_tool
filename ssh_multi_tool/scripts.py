@@ -24,7 +24,8 @@ def build_script(profile: dict, window: dict, marker: str = "") -> str:
 
 def build_interactive_script(profile: dict, marker: str) -> str:
     data = validate_profile(profile)
-    return "\n".join(["set -e", "set -o pipefail", 'cd -- "$HOME"',
-                      f"printf '\\036{marker}:initializing\\037'", data["common_init"],
-                      f"printf '\\036{marker}:interactive\\037'",
-                      "exec bash --noprofile --norc -i", ""])
+    lines = ["set -e", "set -o pipefail", 'cd -- "$HOME"']
+    if marker: lines.append(f"printf '\\036{marker}:initializing\\037'")
+    lines.append(data["common_init"])
+    if marker: lines.append(f"printf '\\036{marker}:interactive\\037'")
+    return "\n".join(lines + ["exec bash --noprofile --norc -i", ""])
