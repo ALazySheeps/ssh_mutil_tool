@@ -6,7 +6,7 @@ import threading
 import uuid
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .editor import ProfileEditor
 from .debug_editor import DebugSlotsEditor
@@ -126,7 +126,7 @@ class App(ttk.Frame):
             button.bind("<Button-3>", lambda event, popup=menu: popup.tk_popup(event.x_root, event.y_root))
         ttk.Button(debug_toolbar, text="配置调试窗口", command=self.edit_debug_slots).pack(side="right")
         middle = ttk.Frame(self); middle.grid(row=3, column=0, sticky="nsew")
-        middle.columnconfigure(0, weight=1); middle.rowconfigure(0, weight=3); middle.rowconfigure(2, weight=1)
+        middle.columnconfigure(0, weight=1); middle.rowconfigure(0, weight=3); middle.rowconfigure(3, weight=1)
         self.window_tabs = ttk.Notebook(middle)
         self.window_tabs.grid(row=0, column=0, columnspan=2, sticky="nsew")
         self.config_page = ttk.Frame(self.window_tabs)
@@ -166,14 +166,24 @@ class App(ttk.Frame):
         self.remote_terminal_button.pack(side="right")
         self.start_window_button = ttk.Button(window_toolbar, text="启动所选窗口", command=self.start_selected_window, state="disabled")
         self.start_window_button.pack(side="right", padx=(0, 6))
+        tmux_toolbar = ttk.Frame(middle)
+        tmux_toolbar.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        ttk.Label(tmux_toolbar, text="tmux 批量操作").pack(side="left", padx=(0, 8))
+        self.reconnect_tmux_all_button = ttk.Button(tmux_toolbar, text="一键重连 tmux",
+            command=lambda: self.control_tmux_all(False), state="disabled")
+        self.reconnect_tmux_all_button.pack(side="left", padx=3)
+        self.stop_tmux_all_button = ttk.Button(tmux_toolbar, text="一键关闭 tmux",
+            command=lambda: self.control_tmux_all(True), state="disabled")
+        self.stop_tmux_all_button.pack(side="left", padx=3)
+        ttk.Label(tmux_toolbar, text="覆盖本轮管理的所有目标；关闭将停止远端程序").pack(side="left", padx=10)
         self.events_list = tk.Listbox(middle, height=4, borderwidth=1, relief="solid", exportselection=False)
-        self.events_list.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        self.events_list.grid(row=3, column=0, columnspan=2, sticky="nsew")
         footer = ttk.Frame(self); footer.grid(row=4, column=0, sticky="ew", pady=(14, 0))
         ttk.Button(footer, text="导入示例", command=lambda: self.import_profile(example_path())).pack(side="left")
         ttk.Label(footer, textvariable=self.status).pack(side="left", padx=12)
         self.launch_button = ttk.Button(footer, text="一键启动", style="Launch.TButton", command=lambda: self.connection(True))
         self.launch_button.pack(side="right")
-        self.close_all_button = ttk.Button(footer, text="一键关闭", command=self.close_all_windows, state="disabled")
+        self.close_all_button = ttk.Button(footer, text="一键断开", command=self.close_all_windows, state="disabled")
         self.close_all_button.pack(side="right", padx=5)
         self.restart_window_button = ttk.Button(footer, text="重启会话", command=self.restart_selected_window, state="disabled")
         self.restart_window_button.pack(side="right", padx=5)
@@ -482,6 +492,8 @@ class App(ttk.Frame):
         self.reconnect_window_button.state(["!disabled"] if persistent and not tasks.get(identifier, {}).get("stopped") and state in FINAL | {"unknown"} and not self.busy else ["disabled"])
         self.stop_window_button.state(["!disabled"] if persistent and state != "closing" and not self.busy and not tasks.get(identifier, {}).get("stopped") else ["disabled"])
         self.restart_window_button.state(["!disabled"] if identifier and state and state != "closing" and not self.busy else ["disabled"])
+        self.reconnect_tmux_all_button.state(["!disabled"] if not self.busy and self.launcher.tmux_windows(reconnect_only=True) else ["disabled"])
+        self.stop_tmux_all_button.state(["!disabled"] if not self.busy and self.launcher.tmux_windows() else ["disabled"])
         self.close_all_button.state(["!disabled"] if self.busy or self.launcher.all_tasks() else ["disabled"])
 
     def close_selected_window(self):
@@ -493,8 +505,47 @@ class App(ttk.Frame):
 
     def close_all_windows(self):
         self.launcher.close_all()
-        self.log("已请求关闭全部窗口，并取消延迟启动任务；tmux保活程序继续运行")
+        self.log("已请求断开全部窗口，并取消延迟启动任务；tmux保活程序继续运行")
         self._update_window_controls()
+
+    def _tmux_passwords(self, windows):
+        targets = {target_key(entry["target"]): entry["target"] for entry in windows.values()}
+        try: current = target_key(self.target())
+        except ValueError: current = None
+        passwords = {}
+        for key, target in targets.items():
+            password = self.password.get() if key == current else ""
+            if not password:
+                password = simpledialog.askstring('TMUX Password',
+                    f"目标：{target['name']}\n{target['username']}@{target['host']}:{target['port']}\n\n请输入SSH密码（取消或留空将跳过此目标）：",
+                    show="*", parent=self.root)
+            if password: passwords[key] = password
+        return passwords
+
+    def control_tmux_all(self, stopping):
+        if self.busy: return
+        windows = self.launcher.tmux_windows(reconnect_only=not stopping)
+        if not windows: self.log("没有需要处理的tmux会话"); return
+        try:
+            if not stopping: check_terminal()
+        except (OSError, RuntimeError) as exc:
+            messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
+        passwords = self._tmux_passwords(windows)
+        epoch = self.launcher.control_epoch
+        self.log("正在批量停止远端tmux会话……" if stopping else "正在尝试重连所有已断开的tmux会话……")
+        def work():
+            try: return self.launcher.control_tmux_all(passwords, stopping=stopping, expected_epoch=epoch)
+            finally: passwords.clear()
+        def complete(report):
+            for entry in report["failed"].values():
+                target = entry["target"]
+                self.log(f"{entry['name']}（{target['username']}@{target['host']}:{target['port']}）：{entry['error']}")
+            if stopping:
+                self.log(f"tmux批量关闭：已停止 {len(report['stopped'])}，失败 {len(report['failed'])}；失败项保留，可稍后重试")
+            else:
+                self.log(f"tmux批量重连：已发起 {len(report['requested'])}，跳过 {len(report['skipped'])}，失败 {len(report['failed'])}；连接结果见窗口状态")
+            self._update_window_controls()
+        self._work(work, complete)
 
     def control_persistent_window(self, stopping):
         identifier = self._selected_run_window()
@@ -567,7 +618,7 @@ class App(ttk.Frame):
             except queue.Empty: break
             self.busy = False; self.launch_button.state(["!disabled"]); self.test_button.state(["!disabled"])
             if operation_epoch != self.launcher.control_epoch:
-                self.log("操作已被一键关闭取消"); continue
+                self.log("操作已被一键断开取消"); continue
             if ok: success(result)
             elif isinstance(result, UnknownHost):
                 if messagebox.askyesno('Confirm - SSH Multi Terminal', f"主机：{result.hostname}\n指纹：{result.fingerprint}\n\n请核对设备指纹，是否信任并继续？", parent=self.root):

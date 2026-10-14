@@ -24,6 +24,35 @@ class GuiTests(unittest.TestCase):
     def cleanup_root(self):
         self.root.destroy(); gc.collect()
 
+    def test_bulk_tmux_stop_collects_each_boards_password_and_unlocks_start(self):
+        from ssh_multi_tool.terminal import target_key
+        app = App(self.root, self.store); self.addCleanup(app.launcher.close)
+        calls = []
+        app.launcher = Launcher(self.store.known_hosts, preflight_fn=lambda *a, **kw: None,
+            tmux_check_fn=lambda *a, **kw: None, open_fn=lambda *a: None)
+        self.addCleanup(app.launcher.close); app.launcher.keep_alive = True
+        app.target_id = 't'
+        for key, value in {"name": "T", "host": "board-a", "port": "22", "username": "u"}.items():
+            app.target_vars[key].set(value)
+        app.password.set('alpha'); target = app.target()
+        app.launcher.start_window(target, 'alpha', app.selected_profile(), 'a')
+        other = dict(target, id='other', name='Other', host='board-b')
+        manual = app.launcher.open_remote_terminal(other, 'beta')
+        app._update_window_controls()
+        self.assertTrue(app.stop_tmux_all_button.instate(["!disabled"]))
+        app._work = lambda action, complete: complete(action())
+        def stopped(target, password, *args, **kwargs): calls.append((target_key(target), password))
+        with patch('ssh_multi_tool.gui.simpledialog.askstring', return_value='beta') as prompt, patch('ssh_multi_tool.launcher.stop_session', side_effect=stopped):
+            app.stop_tmux_all_button.invoke()
+        self.assertEqual(prompt.call_count, 1)
+        self.assertEqual(set(calls), {(target_key(target), 'alpha'), (target_key(other), 'beta')})
+        app._poll()
+        self.assertFalse(app.launcher.active())
+        self.assertTrue(app.launch_button.instate(["!disabled"]))
+        self.assertNotIn(manual, app.launcher.poll())
+        self.assertNotIn('alpha', repr(self.store.preferences()))
+        self.assertEqual(str(app.close_all_button['text']), '一键断开')
+
     def test_renaming_target_does_not_block_stop_of_original_endpoint(self):
         app = App(self.root, self.store); self.addCleanup(app.launcher.close)
         app.launcher = Launcher(self.store.known_hosts, preflight_fn=lambda *a, **kw: None,
@@ -49,6 +78,9 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(app.launcher.keep_alive)
         app.launcher.profile_id = app.selected_profile()["id"]
         app.launcher.tasks = {"a": {"name": "A", "state": "detached", "tmux_session": "smt_test"}}
+        data = app.selected_profile()
+        app.launcher.window_specs = {"a": {"target": {"id": "t", "name": "T", "host": "localhost", "port": 22, "username": "u"},
+            "profile": data, "window": data["windows"][0], "connect_options": {}, "tmux_session": "smt_test"}}
         app.table.selection_set("a"); app._update_window_controls()
         self.assertTrue(app.reconnect_window_button.instate(["!disabled"]))
         self.assertTrue(app.stop_window_button.instate(["!disabled"]))
