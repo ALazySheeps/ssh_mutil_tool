@@ -36,11 +36,11 @@ class Launcher:
         self.connect_options = dict(connect_options or {})
         self.run_target = None; self.run_profile = None; self.run_options = {}; self.control_epoch = 0
         self.shell_tasks = {}; self.shell_specs = {}; self.window_specs = {}
-        self.restarting = set(); self.shell_count = 0; self.keep_alive = False
+        self.restarting = set(); self.shell_count = 0; self.keep_alive = False; self.bulk_running = False
 
     def active(self):
         with self.lock:
-            return self.starting or bool(self.restarting) or any(
+            return self.starting or self.bulk_running or bool(self.restarting) or any(
                 task["state"] not in FINAL | {"unknown"} or (task.get("tmux_session") and not task.get("stopped"))
                 for task in self.tasks.values())
 
@@ -121,7 +121,7 @@ class Launcher:
             if self.closed: raise ValueError("启动器已关闭")
             epoch = self.control_epoch
             if expected_epoch is not None and epoch != expected_epoch: raise ValueError("启动已取消")
-            if self.starting: raise ValueError("已有启动操作，请稍后重试")
+            if self.starting or self.bulk_running: raise ValueError("已有启动或批量操作，请稍后重试")
             self.poll()
             same_run = self.profile_id == profile["id"] and self.run_target == target
             if self.active() and not same_run: raise ValueError("已有其他目标或配置的活动任务，请先关闭")
@@ -273,10 +273,60 @@ class Launcher:
             if self.broker is not None: self.broker.cancel_all()
             for identifier in self.all_tasks(): self.close_window(identifier)
 
+    def tmux_windows(self, *, reconnect_only=False):
+        """Snapshot managed sessions, including delayed windows with a stable name."""
+        with self.lock:
+            tasks = self.poll(); result = {}
+            for identifier, task in tasks.items():
+                spec = self.shell_specs.get(identifier) or self.window_specs.get(identifier)
+                name = task.get("tmux_session") or (spec.get("tmux_session") if spec else None)
+                if not name or task.get("stopped"): continue
+                if reconnect_only and task["state"] not in FINAL | {"unknown"}: continue
+                result[identifier] = {"name": task["name"], "target": copy.deepcopy(spec["target"]),
+                                      "state": task["state"], "tmux_session": name}
+            return result
+
+    def control_tmux_all(self, passwords, *, stopping=False, expected_epoch=None):
+        """Try every managed session; passwords are keyed by exact SSH endpoint."""
+        with self.lock:
+            if self.closed: raise ValueError("启动器已关闭")
+            epoch = self.control_epoch
+            if expected_epoch is not None and epoch != expected_epoch: raise ValueError("批量操作已取消")
+            if self.bulk_running: raise ValueError("已有批量操作，请稍后重试")
+            windows = self.tmux_windows(); self.bulk_running = True
+            if stopping:
+                closing = {identifier: entry for identifier, entry in windows.items() if passwords.get(target_key(entry["target"]))}
+                waiting = [identifier for identifier, task in self.tasks.items() if task["state"] == "waiting"]
+                if waiting and all(identifier in closing for identifier in waiting): self.cancel.set()
+                for identifier, entry in closing.items():
+                    task = self.all_tasks()[identifier]
+                    task["tmux_session"] = entry["tmux_session"]
+                    self.close_window(identifier)
+        report = {"requested": {}, "stopped": {}, "failed": {}, "skipped": {}}
+        try:
+            for identifier, entry in windows.items():
+                if not stopping and entry["state"] not in FINAL | {"unknown"}:
+                    report["skipped"][identifier] = entry; continue
+                try:
+                    with self.lock:
+                        if self.closed or self.control_epoch != epoch: raise ValueError("批量操作已取消")
+                    password = passwords.get(target_key(entry["target"]))
+                    if not password: raise ValueError("未提供该目标的SSH密码")
+                    action = self.stop_window if stopping else self.reconnect_window
+                    action(identifier, password, expected_epoch=epoch)
+                    report["stopped" if stopping else "requested"][identifier] = entry
+                except Exception as exc:
+                    report["failed"][identifier] = dict(entry, error=error_text(exc))
+            return report
+        finally:
+            with self.lock: self.bulk_running = False
+
     def reconnect_window(self, identifier, password, *, expected_epoch=None):
         with self.lock:
             task = self.all_tasks().get(identifier)
-            if not task or not task.get("tmux_session"): raise ValueError("该窗口未启用断线保活")
+            spec = self.shell_specs.get(identifier) or self.window_specs.get(identifier)
+            if not task or not spec or not spec.get("tmux_session"): raise ValueError("该窗口未启用断线保活")
+            task["tmux_session"] = spec["tmux_session"]
             if task.get("stopped"): raise ValueError("该会话已停止，请使用重启会话")
         return self.restart_window(identifier, password, expected_epoch=expected_epoch, reconnect=True)
 
@@ -284,13 +334,25 @@ class Launcher:
         if not password: raise ValueError("请输入该目标的SSH密码")
         with self.lock:
             if self.closed: raise ValueError("启动器已关闭")
-            if expected_epoch is not None and expected_epoch != self.control_epoch: raise ValueError("停止已取消")
+            epoch = self.control_epoch
+            if expected_epoch is not None and expected_epoch != epoch: raise ValueError("停止已取消")
             task = self.all_tasks().get(identifier)
-            if not task or not task.get("tmux_session"): raise ValueError("该窗口未启用断线保活")
+            spec = self.shell_specs.get(identifier) or self.window_specs.get(identifier)
+            if not task or not spec or not spec.get("tmux_session"): raise ValueError("该窗口未启用断线保活")
             if identifier in self.restarting: raise ValueError("窗口正在操作，请稍后重试")
-            spec = copy.deepcopy(self.shell_specs.get(identifier) or self.window_specs[identifier])
+            spec = copy.deepcopy(spec)
             token = task.get("token"); self.restarting.add(identifier)
+            task["tmux_session"] = spec["tmux_session"]
+            # Prevent an opening attachment from creating a session after the kill.
+            self.close_window(identifier)
         try:
+            deadline = time.monotonic() + 20
+            while token and not self.broker.is_closed(token):
+                if self.closed or self.control_epoch != epoch: raise ValueError("停止已取消")
+                if time.monotonic() >= deadline: raise ValueError("旧窗口尚未确认断开，未停止远端会话")
+                time.sleep(.05)
+            with self.lock:
+                if self.closed or self.control_epoch != epoch: raise ValueError("停止已取消")
             stop_session(spec["target"], password, self.known_hosts, spec["tmux_session"], **spec["connect_options"])
             with self.lock:
                 if self.all_tasks().get(identifier) is not task or task.get("token") != token:
