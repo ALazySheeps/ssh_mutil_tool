@@ -14,12 +14,12 @@ from .launcher import FINAL, Launcher
 from .models import validate_profile, validate_target
 from .ssh import UnknownHost, error_text, inspect_host, preflight, trust_host
 from .storage import Store, read_json
-from .terminal import check_terminal
+from .terminal import check_terminal, target_key
 from .settings import connection_options, debug_slots, debug_preferences
 
 STATE_NAMES = {"waiting": "等待", "opening": "打开终端", "connecting": "连接中", "initializing": "初始化中",
                "running": "执行中", "succeeded": "成功结束", "failed": "失败", "disconnected": "连接断开",
-               "unknown": "状态未知", "cancelled": "已取消", "closing": "关闭中", "closed": "已关闭", "interactive": "终端已连接"}
+               "unknown": "状态未知", "cancelled": "已取消", "closing": "关闭中", "closed": "已关闭", "interactive": "终端已连接", "detached": "已断开（可重连）"}
 
 
 def example_path():
@@ -42,10 +42,13 @@ class App(ttk.Frame):
         self.password = tk.StringVar(); self.show_password = tk.BooleanVar(); self.status = tk.StringVar(value="就绪")
         self.summary = tk.StringVar(value="选择或新建启动配置")
         self.debug_slots = debug_slots({})
+        self.keep_alive = tk.BooleanVar(value=False)
         self._build()
         try: self.preferences = self.store.preferences()
         except (ValueError, OSError) as exc: self.preferences = {}; self.log(f"偏好恢复失败：{exc}")
         self.debug_slots = debug_slots(self.preferences)
+        self.keep_alive.set(self.preferences.get("keep_alive", "0") == "1")
+        self.launcher.keep_alive = self.keep_alive.get()
         try: self.launcher.connect_options = connection_options(self.preferences)
         except ValueError as exc:
             self.preferences.pop("connect_timeout", None); self.preferences.pop("auth_timeout", None)
@@ -152,7 +155,13 @@ class App(ttk.Frame):
         self.manual_table.configure(yscrollcommand=manual_scrollbar.set)
         self.manual_table.bind("<<TreeviewSelect>>", lambda event: self._update_window_controls())
         window_toolbar = ttk.Frame(middle); window_toolbar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 5))
-        ttk.Label(window_toolbar, text="运行信息 · 执行中表示命令已开始，不能证明 ROS 节点已就绪").pack(side="left")
+        ttk.Label(window_toolbar, text="会话操作").pack(side="left")
+        self.reconnect_window_button = ttk.Button(window_toolbar, text="重新连接", command=lambda: self.control_persistent_window(False), state="disabled")
+        self.reconnect_window_button.pack(side="left", padx=3)
+        self.stop_window_button = ttk.Button(window_toolbar, text="停止程序", command=lambda: self.control_persistent_window(True), state="disabled")
+        self.stop_window_button.pack(side="left", padx=3)
+        ttk.Checkbutton(window_toolbar, text="断线保活（tmux）", variable=self.keep_alive,
+                        command=self.save_keep_alive).pack(side="left", padx=8)
         self.remote_terminal_button = ttk.Button(window_toolbar, text="打开远程终端", command=self.open_remote_terminal)
         self.remote_terminal_button.pack(side="right")
         self.start_window_button = ttk.Button(window_toolbar, text="启动所选窗口", command=self.start_selected_window, state="disabled")
@@ -251,6 +260,14 @@ class App(ttk.Frame):
         self._sync_remote_windows(self.launcher.poll())
         self._update_window_controls()
         if hasattr(self, "preferences"): self._save_preferences()
+
+    def save_keep_alive(self):
+        updated = dict(self.preferences, keep_alive="1" if self.keep_alive.get() else "0")
+        try: self.store.save_preferences(updated)
+        except (ValueError, OSError) as exc:
+            self.keep_alive.set(self.launcher.keep_alive); self.log(f"偏好保存失败：{exc}"); return
+        self.preferences = updated; self.launcher.keep_alive = self.keep_alive.get()
+        self.log("断线保活已启用，新窗口将在远端tmux中运行" if self.keep_alive.get() else "断线保活已关闭，仅影响后续新窗口")
 
     def _save_preferences(self):
         if self.restoring or not hasattr(self, "preferences"): return
@@ -454,12 +471,16 @@ class App(ttk.Frame):
         window = self._selected_config_window(); profile = self.selected_profile()
         current_task = tasks.get(window["id"]) if window and profile and profile["id"] == self.launcher.profile_id else None
         can_start = bool(window and window["enabled"] and not self.busy and
-                         (not current_task or current_task["state"] in FINAL))
+                         (not current_task or (current_task["state"] in FINAL and (not current_task.get("tmux_session") or current_task.get("stopped")))))
         if self.launcher.active() and (not profile or profile["id"] != self.launcher.profile_id or self.target_id != self.launcher.target_id):
             can_start = False
         self.start_window_button.state(["!disabled"] if can_start else ["disabled"])
         self.remote_terminal_button.state(["disabled"] if self.busy else ["!disabled"])
-        self.close_window_button.state(["!disabled"] if state and state not in {"closing", "closed"} else ["disabled"])
+        self.close_window_button.state(["!disabled"] if state and state not in {"closing", "closed", "detached"} else ["disabled"])
+        persistent = bool(tasks.get(identifier, {}).get("tmux_session"))
+        self.close_window_button.configure(text="断开窗口" if persistent else "关闭会话")
+        self.reconnect_window_button.state(["!disabled"] if persistent and not tasks.get(identifier, {}).get("stopped") and state in FINAL | {"unknown"} and not self.busy else ["disabled"])
+        self.stop_window_button.state(["!disabled"] if persistent and state != "closing" and not self.busy and not tasks.get(identifier, {}).get("stopped") else ["disabled"])
         self.restart_window_button.state(["!disabled"] if identifier and state and state != "closing" and not self.busy else ["disabled"])
         self.close_all_button.state(["!disabled"] if self.busy or self.launcher.all_tasks() else ["disabled"])
 
@@ -467,13 +488,30 @@ class App(ttk.Frame):
         identifier = self._selected_run_window()
         if identifier is None: return
         self.launcher.close_window(identifier)
-        self.log("已请求关闭所选窗口")
+        self.log("已请求断开所选窗口，tmux会话保留" if self.launcher.all_tasks()[identifier].get("tmux_session") else "已请求关闭所选窗口")
         self._update_window_controls()
 
     def close_all_windows(self):
         self.launcher.close_all()
-        self.log("已请求关闭全部窗口，并取消延迟启动任务")
+        self.log("已请求关闭全部窗口，并取消延迟启动任务；tmux保活程序继续运行")
         self._update_window_controls()
+
+    def control_persistent_window(self, stopping):
+        identifier = self._selected_run_window()
+        if identifier is None or self.busy: return
+        try:
+            spec = self.launcher.shell_specs.get(identifier) or self.launcher.window_specs[identifier]
+            if target_key(self.target()) != target_key(spec["target"]): raise ValueError("请先切回该窗口的目标并输入其SSH密码")
+            password = self.password.get()
+            if not password: raise ValueError("请输入该目标的SSH密码")
+            if not stopping: check_terminal()
+        except (ValueError, OSError, RuntimeError) as exc:
+            messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
+        epoch = self.launcher.control_epoch
+        action = self.launcher.stop_window if stopping else self.launcher.reconnect_window
+        self.log("正在停止远端tmux会话……" if stopping else "正在重新连接tmux会话……")
+        self._work(lambda: action(identifier, password, expected_epoch=epoch),
+                   lambda result: self.log("远端tmux会话已停止" if stopping else "已打开重连终端，复用原tmux会话"))
 
     def restart_selected_window(self):
         identifier = self._selected_run_window()
