@@ -24,6 +24,42 @@ class GuiTests(unittest.TestCase):
     def cleanup_root(self):
         self.root.destroy(); gc.collect()
 
+    def test_renaming_target_does_not_block_stop_of_original_endpoint(self):
+        app = App(self.root, self.store); self.addCleanup(app.launcher.close)
+        app.launcher = Launcher(self.store.known_hosts, preflight_fn=lambda *a, **kw: None,
+                                open_fn=lambda *a: None, tmux_check_fn=lambda *a, **kw: None)
+        self.addCleanup(app.launcher.close); app.launcher.keep_alive = True
+        app.target_id = 't'
+        for key, value in {"name": "Old", "host": "localhost", "port": "22", "username": "u"}.items():
+            app.target_vars[key].set(value)
+        app.password.set('pw')
+        identifier = app.launcher.open_remote_terminal(app.target(), 'pw')
+        app.launcher.close_window(identifier); app.launcher.poll()
+        app._sync_remote_windows(app.launcher.poll()); app.window_tabs.select(app.manual_page)
+        app.manual_table.selection_set(identifier); app.target_vars['name'].set('Renamed')
+        app._work = lambda action, complete: complete(action())
+        with patch('ssh_multi_tool.launcher.stop_session'), patch('ssh_multi_tool.gui.messagebox.showerror') as error:
+            app.control_persistent_window(True)
+        self.assertFalse(error.called)
+        self.assertNotIn(identifier, app.launcher.poll())
+
+    def test_keep_alive_preference_and_detached_controls(self):
+        self.store.save_preferences({"keep_alive": "1"})
+        app = App(self.root, self.store); self.addCleanup(app.launcher.close)
+        self.assertTrue(app.launcher.keep_alive)
+        app.launcher.profile_id = app.selected_profile()["id"]
+        app.launcher.tasks = {"a": {"name": "A", "state": "detached", "tmux_session": "smt_test"}}
+        app.table.selection_set("a"); app._update_window_controls()
+        self.assertTrue(app.reconnect_window_button.instate(["!disabled"]))
+        self.assertTrue(app.stop_window_button.instate(["!disabled"]))
+        self.assertTrue(app.close_window_button.instate(["disabled"]))
+        app.launcher.tasks['a'].update(state='closed', stopped=True)
+        app._update_window_controls()
+        self.assertTrue(app.reconnect_window_button.instate(["disabled"]))
+        app.keep_alive.set(False); app.save_keep_alive()
+        self.assertFalse(app.launcher.keep_alive)
+        self.assertEqual(self.store.preferences()["keep_alive"], "0")
+
     def test_window_controls_only_enable_for_current_run(self):
         app = App(self.root, self.store); self.addCleanup(app.launcher.close)
         self.assertTrue(app.close_window_button.instate(["disabled"]))
