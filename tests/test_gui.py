@@ -24,6 +24,23 @@ class GuiTests(unittest.TestCase):
     def cleanup_root(self):
         self.root.destroy(); gc.collect()
 
+    def test_collapsing_log_keeps_new_events_and_restores_history(self):
+        from tkinter import ttk
+        app = App(self.root, self.store); self.addCleanup(app.launcher.close)
+        self.root.deiconify(); self.root.update()
+        def buttons(parent):
+            for child in parent.winfo_children():
+                if isinstance(child, ttk.Button): yield child
+                yield from buttons(child)
+        toggle = next((button for button in buttons(app) if str(button['text']) in {'收起日志', '展开日志'}), None)
+        self.assertIsNotNone(toggle, 'The event log needs a visibility control')
+        if not app.events_list.winfo_ismapped(): toggle.invoke(); self.root.update_idletasks()
+        app.log('before folding'); toggle.invoke(); self.root.update_idletasks()
+        self.assertFalse(app.events_list.winfo_ismapped())
+        app.log('while folded'); toggle.invoke(); self.root.update_idletasks()
+        self.assertTrue(app.events_list.winfo_ismapped())
+        self.assertEqual(app.events_list.get(0, 'end')[-2:], ('before folding', 'while folded'))
+
     def test_bulk_tmux_stop_collects_each_boards_password_and_unlocks_start(self):
         from ssh_multi_tool.terminal import target_key
         app = App(self.root, self.store); self.addCleanup(app.launcher.close)
