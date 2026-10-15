@@ -9,3 +9,5 @@ build/
 dist/
 *.egg-info/
 .coverage
+# Personal exported launch profiles; public examples belong in examples/.
+/*.json
