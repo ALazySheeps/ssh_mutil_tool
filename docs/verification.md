@@ -60,3 +60,16 @@ Ubuntu 20.04 / Python 3.8 完成 PyInstaller 目录式构建、第三方许可�
 CI 定义增加了 CPython 3.8–3.14 和 Ubuntu 20.04/22.04/24.04/26.04 两组独立矩阵；本次在本地执行上述验证，尚未触发远端 GitHub Actions。YAML、Bash 语法、源码编译及差异空白检查通过。原 GUI 文件的 CRLF 保持不变，差异检查使用 `core.whitespace=cr-at-eol`。
 
 这些结果不等同于所有 Python × Ubuntu 组合均已逐一测试，也不代替 Wayland 桌面、RDK X5 实际业务、断网及长期运行验收。源码兼容范围不代表原 Ubuntu 24.04 冻结包可以运行在较旧 Ubuntu。
+
+## 2026-10-14 界面布局优化
+
+分支：`feat/ui-refresh`。按 tkinter-ttkbootstrap-modern-ui 技能的布局、层级和主题原则优化，使用原生 ttk 实现，未增加第三方界面运行依赖。
+
+- Ubuntu 22.04 / Python 3.10 / Tk 8.6：完整 143 项通过，无跳过。
+- Ubuntu 22.04 / Python 3.11 / Tk 9：完整 143 项通过，无跳过。
+- Python 3.8：源码编译和终端参数的 4 项测试通过；本轮未重新执行四发行版矩阵。
+- 主界面 1160×780、1040×720，以及配置编辑、四槽位编辑弹窗完成截图检查。默认折叠日志以扩大表格区域；日志折叠时接收和保留新事件的真实 GUI 回归先失败、修复后通过。
+- 完整测试发现以 `-` 开头的随机令牌触发 argparse 退出码 2，已用真实子进程重现并改为 `--token=<值>`；终端定位前缀同步改为按 helper 参数边界提取。新增回归验证该令牌能进入 helper 模式。
+- 独立只读审查未发现剩余重要问题；wheel 构建、项目外新增 ui 模块/图标读取、Bash 与 Python 语法和差异检查通过。
+
+[主界面示例](images/ui-overview.png)使用临时演示配置，不包含密码或用户保存的配置。Wayland、Windows 实际桌面及其他字体/DPI环境的视觉效果未在本轮重新验收。

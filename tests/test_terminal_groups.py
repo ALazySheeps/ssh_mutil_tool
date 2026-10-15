@@ -11,7 +11,7 @@ class TerminalGroupTests(unittest.TestCase):
             if args[0] == 'gdbus':
                 path = args[args.index('--object-path') + 1]
                 return subprocess.CompletedProcess(args, 0, 'org.gnome.Terminal.Terminal0' if path in live else '', '')
-            token = args[-1]; path = '/org/gnome/Terminal/screen/' + token; live.add(path)
+            token = args[-1].split('=', 1)[1]; path = '/org/gnome/Terminal/screen/' + token; live.add(path)
             return subprocess.CompletedProcess(args, 0, 'GNOME_TERMINAL_SERVICE=:1.20\nGNOME_TERMINAL_SCREEN=' + path + '\n', '')
         groups = terminal.TerminalGroups(run=run, check=lambda: None)
         a = {'host': 'board-a', 'port': 22, 'username': 'u'}

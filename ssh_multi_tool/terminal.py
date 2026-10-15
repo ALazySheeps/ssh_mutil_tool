@@ -13,7 +13,7 @@ def helper_argv(socket_path: str, token: str) -> List[str]:
     else:
         runner = Path(__file__).resolve().parent.parent / "run.py"
         prefix = [sys.executable, str(runner)] if runner.is_file() else [sys.executable, "-m", "ssh_multi_tool"]
-    return prefix + ["--helper", "--socket", socket_path, "--token", token]
+    return prefix + ["--helper", "--socket", socket_path, "--token=" + token]
 
 
 def terminal_argv(helper_args: List[str], title: str) -> List[str]:
@@ -96,7 +96,8 @@ class TerminalGroups:
                              capture_output=True, text=True, timeout=3)
             match = re.search(r'uint32 (\d+)', reply.stdout)
             if reply.returncode or not match: return False
-            args = helper_argv('', '')[:-5] + ['--focus-terminal', '--title=' + reference['title'], '--pid', match[1]]
+            helper = helper_argv('', '')
+            args = helper[:helper.index('--helper')] + ['--focus-terminal', '--title=' + reference['title'], '--pid', match[1]]
             result = self.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, timeout=4)
             return result.returncode == 0
