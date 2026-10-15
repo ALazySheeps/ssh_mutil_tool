@@ -12,7 +12,7 @@ escape_exec() {
     character="${input:index:1}"
     case "$character" in
       '\') escaped+='\\\\' ;;
-      '"') escaped+='\"' ;;
+      '"') escaped+='\\"' ;;
       '$'|'`') escaped+='\\'; escaped+="$character" ;;
       '%') escaped+='%%' ;;
       $'\n') escaped+='\n' ;;
@@ -24,17 +24,29 @@ escape_exec() {
   printf '"%s"' "$escaped"
 }
 
+# Keep installation paths out of the Desktop Entry string/Exec escape layers.
+# Bash ANSI-C octal literals preserve every filename byte, without expansion.
+bash_path() {
+  local LC_ALL=C input="$1" encoded="" byte index
+  for ((index=0; index<${#input}; index++)); do
+    printf -v byte '%03o' "'${input:index:1}"
+    encoded+="\\$byte"
+  done
+  printf "\$'%s'" "$encoded"
+}
+
 if [[ -x "$root/ssh-multi-tool" ]]; then
-  exec_line="$(escape_exec /usr/bin/env) $(escape_exec "$root/ssh-multi-tool")"
+  launch_command="exec $(bash_path "$root/ssh-multi-tool")"
   icon="$root/app-icon.svg"
 else
   source_root="$(cd -- "$root/.." && pwd)"
   if [[ ! -f "$source_root/run.py" || ! -f "$source_root/start.sh" ]]; then
     echo "未找到可执行程序或源码启动脚本。请在解压目录或源码 packaging 目录运行。" >&2; exit 1
   fi
-  exec_line="$(escape_exec /usr/bin/env) $(escape_exec bash) $(escape_exec "$source_root/start.sh")"
+  launch_command="exec /bin/bash $(bash_path "$source_root/start.sh")"
   icon="$source_root/ssh_multi_tool/assets/app-icon.svg"
 fi
+exec_line="$(escape_exec /bin/bash) -c $(escape_exec "$launch_command")"
 if [[ ! -f "$icon" ]]; then echo "缺少应用图标：$icon" >&2; exit 1; fi
 mkdir -p -- "$destination" "$icon_directory"
 cp -- "$icon" "$icon_directory/ssh-multi-tool.svg"
