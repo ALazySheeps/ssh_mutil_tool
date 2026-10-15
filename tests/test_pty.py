@@ -1,5 +1,6 @@
 """Linux-only execution of the exact remote loader in a real PTY."""
 import os
+import errno
 import select
 import sys
 import tempfile
@@ -22,14 +23,18 @@ class PtyTests(unittest.TestCase):
             os.environ["HOME"] = str(home)
             os.execlp("bash", "bash", "--noprofile", "--norc", "-c", loader_command(script.encode(), marker))
         parser = PhaseParser(marker); output = bytearray(); phases = []; sent = False; interrupted = False
-        deadline = time.monotonic() + 8; status = None
+        deadline = time.monotonic() + 8; status = None; pty_closed = False
         try:
             while time.monotonic() < deadline:
-                readable, _, _ = select.select([fd], [], [], .05)
+                readable, _, _ = select.select([] if pty_closed else [fd], [], [], .05)
                 if readable:
                     try: raw = os.read(fd, 65536)
-                    except OSError: break  # Linux PTY returns EIO after slave exits.
-                    if not raw: break
+                    except OSError as exc:
+                        if exc.errno != errno.EIO: raise
+                        raw = b""  # Closing all slave descriptors does not imply process exit.
+                    if not raw:
+                        pty_closed = True
+                        continue
                     visible, events = parser.feed(raw); output.extend(visible); phases.extend(events)
                     if "ready" in events and not sent:
                         payload = script.encode()
@@ -47,13 +52,21 @@ class PtyTests(unittest.TestCase):
                 if done: status = result
             self.assertIsNotNone(status, "PTY command must terminate before timeout")
             output.extend(parser.finish())
-            return os.waitstatus_to_exitcode(status), bytes(output).replace(b"\r\n", b"\n"), phases
+            code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -os.WTERMSIG(status)
+            return code, bytes(output).replace(b"\r\n", b"\n"), phases
         finally:
             os.close(fd)
             if status is None:
                 import signal
                 try: os.kill(pid, signal.SIGKILL); os.waitpid(pid, 0)
                 except ProcessLookupError: pass
+
+    def test_closed_terminal_descriptors_do_not_imply_process_has_exited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = 'b' * 32
+            code, _, _ = self.execute('exec </dev/null >/dev/null 2>&1; sleep 0.25; exit 0',
+                                      marker, Path(directory))
+        self.assertEqual(code, 0)
 
     def test_loader_runs_large_script_with_source_export_and_literal_directory(self):
         with tempfile.TemporaryDirectory() as tmp:

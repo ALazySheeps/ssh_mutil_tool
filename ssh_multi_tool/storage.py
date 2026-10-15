@@ -5,6 +5,7 @@ import tempfile
 import uuid
 import shutil
 from pathlib import Path
+from typing import Optional
 
 from .settings import debug_slots
 from .models import validate_profile, validate_target
@@ -50,7 +51,7 @@ def read_json(path: Path):
 
 
 class Store:
-    def __init__(self, root: Path | None = None):
+    def __init__(self, root: Optional[Path] = None):
         self.root = Path(root) if root is not None else config_root()
         self.profiles_dir = self.root / "profiles"
         self.profiles_dir.mkdir(parents=True, exist_ok=True, mode=0o700)

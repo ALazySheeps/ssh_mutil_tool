@@ -283,9 +283,15 @@ while true; do printf "$VALUE\\n" >> {self.home}/ticks; sleep .05; done
         self.assertEqual(self.home.joinpath('ticks').stat().st_size, size)
 
     def test_large_script_and_finished_output_are_preserved(self):
-        payload = '#' + 'x' * (150 * 1024) + f'\nprintf done > {self.home}/ticks\nprintf RESULT_OK\\n\n'
+        payload = '#' + 'x' * (150 * 1024) + f'\nprintf done > {self.home}/ticks\nprintf RESULT_OK\\n\nsleep .3\n'
         self.attach(payload)
         self.assertEqual(self.home.joinpath('ticks').read_text(), 'done')
+        import time
+        deadline = time.monotonic() + 3
+        while True:
+            dead = self.command("display-message -p -t =smt_test:0.0 '#{pane_dead}'").stdout.strip()
+            if dead == b'1' or time.monotonic() >= deadline: break
+            time.sleep(.01)
+        self.assertEqual(dead, b'1', 'The finished pane must remain available after process exit')
         result = self.command('capture-pane -p -S - -t =smt_test:0.0')
         self.assertIn(b'RESULT_OK', result.stdout)
-        self.assertEqual(self.command("display-message -p -t =smt_test:0.0 '#{pane_dead}'").stdout.strip(), b'1')

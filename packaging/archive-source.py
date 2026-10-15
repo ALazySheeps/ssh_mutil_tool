@@ -9,7 +9,7 @@ def main():
     output = root / "dist" / "ssh-multi-tool-0.1.0-source.zip"
     output.parent.mkdir(exist_ok=True)
     files = [root / name for name in ("README.md", "LICENSE", "pyproject.toml", "requirements.txt", "run.py", "start.sh", "install-ubuntu.sh", ".gitignore")]
-    for directory in ("ssh_multi_tool", "examples", "tests", "docs", "packaging"):
+    for directory in ("ssh_multi_tool", "examples", "tests", "docs", "packaging", ".github"):
         files.extend(path for path in (root / directory).rglob("*")
                      if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc")
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:

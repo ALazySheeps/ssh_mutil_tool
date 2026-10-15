@@ -13,6 +13,8 @@ import threading
 import time
 from pathlib import Path
 
+from .compat import process_identity, process_is_alive
+
 MAX_FRAME = 2 * 1024 * 1024
 STATES = {"connecting", "initializing", "running", "succeeded", "failed", "disconnected", "unknown", "closed", "interactive"}
 
@@ -50,7 +52,8 @@ class TokenVault:
                 try: pidfd = os.pidfd_open(pid)
                 except OSError: pass
             self.controls[control_token] = {"close": False, "event_token": event_token,
-                                            "launch_token": token, "pidfd": pidfd}
+                                            "launch_token": token, "pidfd": pidfd, "pid": pid,
+                                            "process_identity": process_identity(pid) if pid is not None and pidfd is None else None}
             return snapshot
 
     def cancel(self, token):
@@ -77,6 +80,10 @@ class TokenVault:
             if control:
                 pidfd = self.controls[control]["pidfd"]
                 if pidfd is not None and select.select([pidfd], [], [], 0)[0]: self._release(control)
+                elif pidfd is None:
+                    item = self.controls[control]
+                    if item["pid"] is not None and not process_is_alive(item["pid"], item["process_identity"]):
+                        self._release(control)
             return token not in self.pending and token not in self.sessions
 
     def control(self, token, released=False):

@@ -48,44 +48,57 @@ class WindowIconTests(unittest.TestCase):
 
 
 class DesktopIconTests(unittest.TestCase):
+    def launch_entry(self, entry, marker):
+        if shutil.which('desktop-file-validate'):
+            subprocess.run(['desktop-file-validate', str(entry)], check=True)
+        probe = """import gi,sys
+try:
+    from gi.repository import GioUnix
+    DesktopAppInfo = GioUnix.DesktopAppInfo
+except ImportError:
+    from gi.repository import Gio
+    DesktopAppInfo = Gio.DesktopAppInfo
+app = DesktopAppInfo.new_from_filename(sys.argv[1])
+assert app
+app.launch([], None)
+"""
+        result = subprocess.run(['/usr/bin/python3', '-c', probe, str(entry)],
+                                cwd=str(entry.parent), capture_output=True, text=True)
+        if 'No module named' in result.stderr: self.skipTest('Gio desktop parsing needs system PyGObject')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        import time
+        deadline = time.monotonic() + 2
+        while not marker.exists() and time.monotonic() < deadline: time.sleep(.01)
+        self.assertTrue(marker.exists(), 'The desktop entry must execute the intended launcher')
+        self.assertFalse((entry.parent / 'injected').exists(), 'Installation paths must remain literal')
+
     def test_packaged_launcher_installs_icon_and_launches_from_special_path(self):
-        with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory); package = base / 'Tool 中文 "$cash" 50%'
-            package.mkdir(); data = base / 'data'
-            shutil.copyfile(ROOT / 'packaging/install-desktop.sh', package / 'install-desktop.sh')
-            shutil.copyfile(ROOT / 'ssh_multi_tool/assets/app-icon.svg', package / 'app-icon.svg')
-            binary = package / 'ssh-multi-tool'; binary.write_text('#!/bin/sh\nprintf ran > "$0.ran"\n'); binary.chmod(0o755)
-            subprocess.run(['bash', str(package / 'install-desktop.sh')], env=dict(os.environ, XDG_DATA_HOME=str(data)),
-                           capture_output=True, text=True, check=True)
-            entry = data / 'applications/ssh-multi-tool.desktop'
-            contents = configparser.ConfigParser(interpolation=None); contents.read(entry)
-            self.assertEqual(contents['Desktop Entry'].get('Icon'), 'ssh-multi-tool')
-            self.assertEqual(contents['Desktop Entry'].get('StartupWMClass'), 'Sshmultitool')
-            self.assertTrue((data / 'icons/hicolor/scalable/apps/ssh-multi-tool.svg').is_file())
-            if shutil.which('desktop-file-validate'):
-                subprocess.run(['desktop-file-validate', str(entry)], check=True)
-            probe = 'import gi,sys; from gi.repository import Gio; app=Gio.DesktopAppInfo.new_from_filename(sys.argv[1]); assert app; app.launch([],None)'
-            # Ubuntu's desktop parser, not shell parsing, must execute the installed entry.
-            result = subprocess.run(['/usr/bin/python3', '-c', probe, str(entry)], capture_output=True, text=True)
-            if 'No module named' in result.stderr: self.skipTest('Gio desktop parsing needs system PyGObject')
-            self.assertEqual(result.returncode, 0, result.stderr)
-            import time
-            deadline = time.monotonic() + 2
-            while not binary.with_name(binary.name + '.ran').exists() and time.monotonic() < deadline: time.sleep(.01)
-            self.assertTrue(binary.with_name(binary.name + '.ran').exists(), 'Desktop entry must run its bundled binary')
+        for name in ('Tool 中文 "$cash" 50%', "Tool $(touch injected) `literal` \\ slash 'quote'", 'Tool tab\tline\nbreak'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory); package = base / name
+                package.mkdir(); data = base / 'data'
+                shutil.copyfile(ROOT / 'packaging/install-desktop.sh', package / 'install-desktop.sh')
+                shutil.copyfile(ROOT / 'ssh_multi_tool/assets/app-icon.svg', package / 'app-icon.svg')
+                binary = package / 'ssh-multi-tool'; binary.write_text('#!/bin/sh\nprintf ran > "$0.ran"\n'); binary.chmod(0o755)
+                subprocess.run(['bash', str(package / 'install-desktop.sh')], env=dict(os.environ, XDG_DATA_HOME=str(data)),
+                               capture_output=True, text=True, check=True)
+                entry = data / 'applications/ssh-multi-tool.desktop'
+                contents = configparser.ConfigParser(interpolation=None); contents.read(entry)
+                self.assertEqual(contents['Desktop Entry'].get('Icon'), 'ssh-multi-tool')
+                self.assertEqual(contents['Desktop Entry'].get('StartupWMClass'), 'Sshmultitool')
+                self.assertTrue((data / 'icons/hicolor/scalable/apps/ssh-multi-tool.svg').is_file())
+                self.launch_entry(entry, binary.with_name(binary.name + '.ran'))
 
     def test_source_launcher_registers_source_script_and_icon(self):
         with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory); source = base / 'source'; (source / 'packaging').mkdir(parents=True)
+            base = Path(directory); source = base / 'source 中文 "$cash" 50%'; (source / 'packaging').mkdir(parents=True)
             assets = source / 'ssh_multi_tool/assets'; assets.mkdir(parents=True)
             shutil.copyfile(ROOT / 'packaging/install-desktop.sh', source / 'packaging/install-desktop.sh')
             shutil.copyfile(ROOT / 'ssh_multi_tool/assets/app-icon.svg', assets / 'app-icon.svg')
             (source / 'run.py').write_text('')
-            (source / 'start.sh').write_text('#!/bin/sh\nexit 0\n')
+            (source / 'start.sh').write_text('#!/bin/sh\nprintf ran > "$0.ran"\n')
             data = base / 'data'
             subprocess.run(['bash', str(source / 'packaging/install-desktop.sh')], env=dict(os.environ, XDG_DATA_HOME=str(data)),
                            capture_output=True, check=True)
-            contents = configparser.ConfigParser(interpolation=None)
-            contents.read(data / 'applications/ssh-multi-tool.desktop')
-            self.assertIn('start.sh', contents['Desktop Entry']['Exec'])
             self.assertTrue((data / 'icons/hicolor/scalable/apps/ssh-multi-tool.svg').exists())
+            self.launch_entry(data / 'applications/ssh-multi-tool.desktop', source / 'start.sh.ran')

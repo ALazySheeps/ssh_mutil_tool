@@ -2,7 +2,7 @@
 
 在本机选择目标设备及启动配置，一次输入SSH密码，一键打开多个终端，在RDK X5等Ubuntu设备上分别配置环境并启动程序。
 
-首版采用Python、Tkinter及Paramiko。Ubuntu桌面的多终端运行需要GNOME Terminal；Windows目前可编辑配置及测试连接，不提供多窗口启动。已生成Ubuntu24.04 x86_64测试包，并在Ubuntu24.04 WSL下通过47项测试及冻结包GUI/helper启动检查。真实GNOME Terminal与RDK X5端到端验收仍待完成；Ubuntu22.04需另行构建验证。
+首版采用Python、Tkinter及Paramiko。Ubuntu桌面的多终端运行需要GNOME Terminal；Windows目前可编辑配置及测试连接，不提供多窗口启动。源码版支持 Ubuntu 20.04、22.04、24.04、26.04 的常规桌面环境和 CPython 3.8–3.14，版本与实测范围见[兼容性说明](docs/compatibility.md)。真实开发板及长期运行验收仍按[验证清单](docs/verification.md)执行。
 
 ## Ubuntu 24.04 测试包
 
@@ -24,6 +24,15 @@ sudo apt install python3 python3-tk python3-venv gnome-terminal fonts-noto-cjk l
 bash install-ubuntu.sh
 bash start.sh
 ```
+
+默认使用系统 `python3`，最低版本为 3.8；Tk 和 venv 需与所用解释器版本匹配。需要指定解释器时：
+
+```bash
+SSHMT_PYTHON=python3.12 bash install-ubuntu.sh
+bash start.sh
+```
+
+`start.sh` 优先使用安装生成的 `.venv`。显式设置 `SSHMT_PYTHON` 启动时使用该解释器，它须自行装好 Tk 和项目依赖。Python 3.8 自动安装 Paramiko 3，较新 Python 使用 Paramiko 3/4。
 
 `install-ubuntu.sh`在项目目录创建隔离虚拟环境，首次安装依赖需要网络。之后打开工具不需要联网安装，只需要能访问目标设备。可将命令绑定到桌面快捷方式。
 
@@ -123,12 +132,13 @@ python3 -m venv .venv
 在Ubuntu x86_64运行：
 
 ```bash
+sudo apt install binutils libpython3-dev
 bash packaging/build-ubuntu.sh
 ```
 
 输出为 `dist/ssh-multi-tool-0.1.0-<发行版版本>-x86_64.tar.gz`，例如 `ubuntu24.04`。目录式包内包含Python、Tk及SSH依赖，接收者无需Python/pip，仍需GNOME Terminal及图形桌面。在解压目录运行 `./ssh-multi-tool`；可选 `bash install-desktop.sh` 添加应用菜单入口。
 
-构建脚本收集第三方许可证，缺失时停止并要求补齐。构建通过不等于可发布，Ubuntu22.04和24.04应分别按[验证清单](docs/verification.md)验收。
+构建脚本收集第三方许可证，缺失时停止并要求补齐。构建通过不等于可发布，各目标 Ubuntu 版本应分别按[验证清单](docs/verification.md)验收。
 
 ## 应用图标
 

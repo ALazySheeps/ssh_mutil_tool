@@ -3,6 +3,8 @@ import importlib.metadata
 import shutil
 import sys
 import subprocess
+import tkinter
+from packaging.requirements import Requirement
 from pathlib import Path
 
 
@@ -10,7 +12,15 @@ def main(destination):
     root = Path(destination); root.mkdir(parents=True, exist_ok=True)
     records = []
     for name in ("paramiko", "bcrypt", "cryptography", "invoke", "pynacl", "cffi", "pycparser", "pyinstaller"):
-        distribution = importlib.metadata.distribution(name)
+        try:
+            distribution = importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            # Paramiko 3 lists invoke under optional extras; Paramiko 4 requires it.
+            requirements = [Requirement(raw) for raw in importlib.metadata.requires("paramiko") or []]
+            required = any(req.name == name and (req.marker is None or req.marker.evaluate({"extra": ""}))
+                           for req in requirements)
+            if name == "invoke" and not required: continue
+            raise
         directory = root / name; directory.mkdir(exist_ok=True)
         (directory / "METADATA.txt").write_text(distribution.read_text("METADATA") or "", encoding="utf-8")
         files = [entry for entry in distribution.files or []
@@ -22,13 +32,14 @@ def main(destination):
         records.append(f"{name} {distribution.version}")
     # Python and Tcl/Tk library notices are not Python distribution metadata.
     license_candidates = [Path(sys.base_prefix) / "LICENSE.txt", Path(sys.base_prefix) / "LICENSE",
-                          Path("/usr/share/doc/python3/copyright"), Path("/usr/share/doc/libpython3.10-stdlib/copyright"),
-                          Path("/usr/share/doc/libpython3.12-stdlib/copyright")]
+                          Path("/usr/share/doc") / f"libpython{sys.version_info.major}.{sys.version_info.minor}-stdlib" / "copyright",
+                          Path("/usr/share/doc/python3/copyright")]
     python_license = next((path for path in license_candidates if path.is_file()), None)
     if python_license is None: raise RuntimeError("未找到Python许可证文件")
     shutil.copyfile(python_license, root / "PYTHON_LICENSE.txt")
-    for name in ("libtcl8.6", "libtk8.6"):
+    for name in (f"libtcl{tkinter.TclVersion}", f"libtk{tkinter.TkVersion}"):
         path = Path("/usr/share/doc") / name / "copyright"
+        if not path.is_file(): path = Path("/usr/share/doc") / name[3:] / "copyright"
         if not path.is_file(): raise RuntimeError(f"未找到{name}许可证，请在Ubuntu标准Tk构建环境执行")
         shutil.copyfile(path, root / f"{name}_COPYRIGHT.txt")
     # System libraries bundled by PyInstaller also need their distribution notices.

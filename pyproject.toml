@@ -1,20 +1,26 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = [
+  "setuptools>=61,<75; python_version < '3.9'",
+  "setuptools>=77; python_version >= '3.9'",
+]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ssh-multi-tool"
 version = "0.1.0"
 description = "Lightweight Ubuntu GUI launcher for multiple SSH terminal sessions"
-requires-python = ">=3.10"
-dependencies = ["paramiko>=3.4,<5"]
-license = "MIT"
-license-files = ["LICENSE"]
+requires-python = ">=3.8"
+dependencies = [
+  "paramiko>=3.4,<4; python_version < '3.9'",
+  "paramiko>=3.4,<5; python_version >= '3.9'",
+]
+license = {file = "LICENSE"}
 
 [project.scripts]
 ssh-multi-tool = "ssh_multi_tool.__main__:main"
 
 [tool.setuptools]
+license-files = ["LICENSE"]
 packages = ["ssh_multi_tool"]
 
 [tool.setuptools.package-data]
