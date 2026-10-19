@@ -193,7 +193,8 @@ class App(ttk.Frame):
             scrollbar = ttk.Scrollbar(page, orient='vertical', command=table.yview)
             scrollbar.grid(row=0, column=1, sticky='ns'); table.configure(yscrollcommand=scrollbar.set)
             table.bind('<<TreeviewSelect>>', lambda event: self._update_window_controls())
-        self.table.bind('<Double-1>', lambda event: self.edit_profile())
+        self.table.bind('<Double-1>', self.show_window_commands)
+        self.table.bind('<Return>', lambda event: self.show_window_commands())
         selected = ttk.Frame(card); selected.grid(row=2, column=0, sticky='ew', pady=(10, 0))
         ttk.Label(selected, text='所选窗口', style='Muted.TLabel').pack(side='left', padx=(0, 8))
         for attribute, text, command, style in (
@@ -341,6 +342,49 @@ class App(ttk.Frame):
 
     def _profile_saved(self, profile):
         self.store.save_profile(profile); self.refresh_profiles(profile["id"]); self.log("配置已保存")
+
+    def show_window_commands(self, event=None):
+        if event is not None:
+            identifier = self.table.identify_row(event.y)
+            if not identifier or self.table.identify_region(event.x, event.y) != 'cell': return
+            self.table.selection_set(identifier)
+        window = self._selected_config_window()
+        if window is None: return
+        previous = self.root.children.get('command_preview')
+        if previous is not None: previous.destroy()
+        dialog = tk.Toplevel(self.root, name='command_preview')
+        dialog.title('Window Commands - SSH Multi Terminal'); dialog.geometry('780x460'); dialog.minsize(480, 300)
+        dialog.transient(self.root); dialog.bind('<Escape>', lambda event: dialog.destroy())
+        dialog.columnconfigure(0, weight=1); dialog.rowconfigure(1, weight=1)
+        header = ttk.Frame(dialog, padding=(16, 14, 16, 8)); header.grid(row=0, column=0, sticky='ew')
+        ttk.Label(header, text=window['name'], style='Section.TLabel').pack(anchor='w')
+        ttk.Label(header, text='工作目录：' + (window['working_directory'] or '继承公共初始化目录'),
+                  style='Muted.TLabel', wraplength=700).pack(anchor='w', pady=(4, 0))
+        body = ttk.Frame(dialog, padding=(16, 0, 16, 0)); body.grid(row=1, column=0, sticky='nsew')
+        body.columnconfigure(0, weight=1); body.rowconfigure(0, weight=1)
+        commands = window['commands']
+        text = tk.Text(body, wrap='none', font=('TkFixedFont', 11), exportselection=False)
+        style_text(text, code=True)
+        text.insert('1.0', commands); text.configure(state='disabled')
+        text.grid(row=0, column=0, sticky='nsew')
+        vertical = ttk.Scrollbar(body, orient='vertical', command=text.yview)
+        vertical.grid(row=0, column=1, sticky='ns')
+        horizontal = ttk.Scrollbar(body, orient='horizontal', command=text.xview)
+        horizontal.grid(row=1, column=0, sticky='ew')
+        text.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        def select_all(event):
+            text.tag_add('sel', '1.0', 'end-1c'); return 'break'
+        text.bind('<Control-a>', select_all)
+        footer = ttk.Frame(dialog, padding=(16, 10)); footer.grid(row=2, column=0, sticky='ew')
+        hint = ttk.Label(footer, text='可选中复制；此处仅显示该窗口的启动命令。', style='Muted.TLabel', wraplength=180)
+        hint.pack(side='left', fill='x', expand=True)
+        def copy_commands():
+            self.root.clipboard_clear(); self.root.clipboard_append(commands)
+            hint.configure(text='启动命令已复制')
+        ttk.Button(footer, text='关闭', command=dialog.destroy).pack(side='right')
+        ttk.Button(footer, text='复制启动命令', command=copy_commands,
+                   style='Primary.TButton').pack(side='right', padx=(8, 8))
+        text.focus_set()
 
     def edit_profile(self, new=False):
         profile = None if new else self.selected_profile()

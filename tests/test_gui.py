@@ -24,6 +24,39 @@ class GuiTests(unittest.TestCase):
     def cleanup_root(self):
         self.root.destroy(); gc.collect()
 
+    def test_double_click_previews_clicked_windows_literal_commands_and_copies_them(self):
+        from tkinter import ttk
+        data = profile()
+        data['windows'].append(dict(data['windows'][0], id='b', name='第二窗口',
+                                    commands="printf '%s\\n' 中文 $HOME\necho done\n", working_directory=''))
+        self.store.save_profile(data)
+        app = App(self.root, self.store); self.addCleanup(app.launcher.close)
+        self.root.deiconify(); self.root.update()
+        app.table.selection_set('a')
+        x, y, width, height = app.table.bbox('b')
+        for timestamp in (1000, 1100):
+            app.table.event_generate('<ButtonPress-1>', x=x + 10, y=y + height // 2, time=timestamp)
+            app.table.event_generate('<ButtonRelease-1>', x=x + 10, y=y + height // 2, time=timestamp + 1)
+        self.root.update()
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+        dialogs = [child for child in self.root.winfo_children() if isinstance(child, tk.Toplevel)]
+        self.assertEqual(len(dialogs), 1)
+        dialog = dialogs[0]
+        texts = [child for child in descendants(dialog) if isinstance(child, tk.Text)]
+        self.assertEqual([text.get('1.0', 'end-1c') for text in texts],
+                         ["printf '%s\\n' 中文 $HOME\necho done\n"])
+        self.assertEqual(str(texts[0]['state']), 'disabled')
+        copy_button = next(child for child in descendants(dialog)
+                           if isinstance(child, ttk.Button) and child['text'] == '复制启动命令')
+        copy_button.invoke(); self.root.update()
+        self.assertEqual(self.root.clipboard_get(), "printf '%s\\n' 中文 $HOME\necho done\n")
+        dialog.destroy()
+        self.assertEqual(self.store.load_profile('demo')['windows'][1]['commands'],
+                         "printf '%s\\n' 中文 $HOME\necho done\n")
+
     def test_collapsing_log_keeps_new_events_and_restores_history(self):
         from tkinter import ttk
         app = App(self.root, self.store); self.addCleanup(app.launcher.close)

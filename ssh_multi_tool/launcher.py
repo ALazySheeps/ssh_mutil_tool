@@ -227,7 +227,7 @@ class Launcher:
         script_marker = "" if spec.get("tmux_session") else marker
         if spec["debug_slot"] is not None:
             script = build_script(spec["profile"], {"working_directory": "", "commands": spec["debug_slot"]["commands"]}, script_marker)
-        else: script = build_interactive_script(spec["profile"], script_marker) if spec["profile"] is not None else "exec bash --noprofile --norc -i\n" if spec.get("tmux_session") else ""
+        else: script = build_interactive_script(spec["profile"], script_marker) if spec["profile"] is not None else build_interactive_script(None, "") if spec.get("tmux_session") else ""
         snapshot = {"run_id": session_id, "task_id": identifier, "target": spec["target"],
                     "password": password, "known_hosts": self.known_hosts, "mode": "debug" if spec["debug_slot"] is not None else "shell",
                     "script": script, "marker": marker, "connect_options": spec["connect_options"], "tmux_session": spec.get("tmux_session"), "tmux_attach_only": attach_only}
