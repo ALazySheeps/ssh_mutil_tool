@@ -13,7 +13,7 @@ from .editor import ProfileEditor
 from .debug_editor import DebugSlotsEditor
 from .icons import WINDOW_CLASS, apply_window_icon
 from .launcher import FINAL, Launcher
-from .models import validate_profile, validate_target
+from .models import validate_profile, validate_target, is_local, local_target
 from .ssh import UnknownHost, error_text, inspect_host, preflight, trust_host
 from .storage import Store, read_json
 from .terminal import check_terminal, target_key
@@ -39,6 +39,7 @@ class App(ttk.Frame):
         self.launcher = Launcher(self.store.known_hosts)
         self.targets = []; self.profiles = []; self.target_id = None
         self.target_choice = tk.StringVar(); self.profile_choice = tk.StringVar()
+        self.execution_mode = tk.StringVar(value="remote")
         self.target_vars = {key: tk.StringVar(value="22" if key == "port" else "")
                             for key in ("name", "host", "port", "username")}
         self.password = tk.StringVar(); self.show_password = tk.BooleanVar(); self.status = tk.StringVar(value="就绪")
@@ -61,6 +62,8 @@ class App(ttk.Frame):
         except (ValueError, OSError) as exc: self.log(f"目标恢复失败：{exc}")
         self.refresh_targets(self.preferences.get("last_target_id"))
         self.refresh_profiles(self.preferences.get("last_profile_id"))
+        self.execution_mode.set(self.preferences.get("execution_mode", "remote"))
+        self._execution_mode_changed()
         geometry = self.preferences.get("geometry")
         if geometry:
             try: self.root.geometry(geometry)
@@ -98,7 +101,16 @@ class App(ttk.Frame):
     def _build_connection(self, sidebar):
         card = ttk.Frame(sidebar, style='Card.TFrame', padding=14)
         card.grid(row=0, column=0, sticky='ew'); card.columnconfigure(0, weight=1)
-        ttk.Label(card, text='目标设备', style='Section.TLabel').grid(row=0, column=0, sticky='w', pady=(0, 10))
+        ttk.Label(card, text='启动位置', style='Section.TLabel').grid(row=0, column=0, sticky='w', pady=(0, 10))
+        modes = ttk.Frame(card); modes.grid(row=1, column=0, sticky='ew', pady=(0, 10))
+        for label, value in (('远程 SSH', 'remote'), ('本机', 'local')):
+            ttk.Radiobutton(modes, text=label, variable=self.execution_mode, value=value,
+                            command=self._execution_mode_changed).pack(side='left', padx=(0, 16))
+        self.local_hint = ttk.Label(card, text='在当前电脑执行配置命令\n无需 SSH 服务或密码\n工作目录和依赖使用本机环境',
+                                    style='Muted.TLabel', wraplength=260)
+        self.local_hint.grid(row=2, column=0, sticky='w', pady=(0, 8)); self.local_hint.grid_remove()
+        self.remote_fields = ttk.Frame(card); self.remote_fields.grid(row=3, column=0, sticky='ew')
+        card = self.remote_fields; card.columnconfigure(0, weight=1)
         self.target_combo = ttk.Combobox(card, textvariable=self.target_choice, state='readonly')
         self.target_combo.grid(row=1, column=0, sticky='ew')
         self.target_combo.bind('<<ComboboxSelected>>', lambda event: self._target_selected())
@@ -176,7 +188,8 @@ class App(ttk.Frame):
         card.grid(row=1, column=0, sticky='nsew'); card.columnconfigure(0, weight=1); card.rowconfigure(1, weight=1)
         heading = ttk.Frame(card); heading.grid(row=0, column=0, sticky='ew', pady=(0, 6))
         ttk.Label(heading, text='窗口与会话', style='Section.TLabel').pack(side='left')
-        ttk.Checkbutton(heading, text='断线保活（tmux）', variable=self.keep_alive, command=self.save_keep_alive).pack(side='right')
+        self.keep_alive_button = ttk.Checkbutton(heading, text='断线保活（tmux）', variable=self.keep_alive, command=self.save_keep_alive)
+        self.keep_alive_button.pack(side='right')
         self.window_tabs = ttk.Notebook(card); self.window_tabs.grid(row=1, column=0, sticky='nsew')
         self.config_page = ttk.Frame(self.window_tabs); self.manual_page = ttk.Frame(self.window_tabs)
         self.window_tabs.add(self.config_page, text='配置窗口'); self.window_tabs.add(self.manual_page, text='手动终端')
@@ -185,7 +198,7 @@ class App(ttk.Frame):
         self.window_tabs.bind('<<NotebookTabChanged>>', lambda event: self._update_window_controls())
         self.table = ttk.Treeview(self.config_page, columns=('name', 'directory', 'delay', 'state'), show='headings', height=5, selectmode='browse')
         self.manual_table = ttk.Treeview(self.manual_page, columns=('name', 'directory', 'state'), show='headings', height=5, selectmode='browse')
-        for table, page, columns in ((self.table, self.config_page, [('name', '窗口', 150), ('directory', '远端工作目录', 220), ('delay', '延迟 / 秒', 70), ('state', '状态', 135)]),
+        for table, page, columns in ((self.table, self.config_page, [('name', '窗口', 150), ('directory', '工作目录', 220), ('delay', '延迟 / 秒', 70), ('state', '状态', 135)]),
                                       (self.manual_table, self.manual_page, [('name', '目标 / 终端', 250), ('directory', '初始目录', 210), ('state', '状态', 135)])):
             for column, label, width in columns:
                 table.heading(column, text=label, anchor='w'); table.column(column, width=width, minwidth=60, stretch=column in {'name', 'directory'})
@@ -271,13 +284,31 @@ class App(ttk.Frame):
         for key, variable in self.target_vars.items(): variable.set("22" if key == "port" else "")
         self.password.set("")
 
+    def _execution_mode_changed(self):
+        local = self.execution_mode.get() == "local"
+        self.password.set("")
+        if local:
+            self.remote_fields.grid_remove(); self.local_hint.grid()
+        else:
+            self.local_hint.grid_remove(); self.remote_fields.grid()
+        self.password_entry.state(["disabled"] if local else ["!disabled"])
+        self.keep_alive_button.state(["disabled"] if local else ["!disabled"])
+        self.keep_alive.set(False if local else self.launcher.keep_alive)
+        self.remote_terminal_button.configure(text="打开本机终端" if local else "打开远程终端")
+        self._save_preferences(); self._update_window_controls()
+
+    def _current_target_id(self):
+        return local_target()["id"] if self.execution_mode.get() == "local" else self.target_id
+
     def target(self):
+        if self.execution_mode.get() == "local": return local_target()
         data = {key: variable.get().strip() for key, variable in self.target_vars.items()}
         try: data["port"] = int(data["port"])
         except ValueError: raise ValueError("SSH端口必须是整数")
         return validate_target(dict(data, id=self.target_id or uuid.uuid4().hex))
 
     def save_target(self, quiet=False):
+        if self.execution_mode.get() == "local": return local_target()
         try:
             target = self.target(); items = [item for item in self.targets if item["id"] != target["id"]] + [target]
             self.store.save_targets(items); self.targets = items; self.refresh_targets(target["id"])
@@ -325,6 +356,7 @@ class App(ttk.Frame):
         if hasattr(self, "preferences"): self._save_preferences()
 
     def save_keep_alive(self):
+        if self.execution_mode.get() == "local": return
         updated = dict(self.preferences, keep_alive="1" if self.keep_alive.get() else "0")
         try: self.store.save_preferences(updated)
         except (ValueError, OSError) as exc:
@@ -336,7 +368,7 @@ class App(ttk.Frame):
         if self.restoring or not hasattr(self, "preferences"): return
         profile = self.selected_profile()
         self.preferences.update(last_target_id=self.target_id or "", last_profile_id=profile["id"] if profile else "",
-                                geometry=self.root.geometry(), terminal="gnome-terminal")
+                                geometry=self.root.geometry(), terminal="gnome-terminal", execution_mode=self.execution_mode.get())
         try: self.store.save_preferences(self.preferences)
         except (ValueError, OSError) as exc: self.log(f"偏好保存失败：{exc}")
 
@@ -439,16 +471,19 @@ class App(ttk.Frame):
         try:
             if start: check_terminal()
             target = self.save_target(quiet=True); password = self.password.get()
-            if not password: raise ValueError("请输入SSH密码，密码仅在本次使用期间保留")
+            if not password and not is_local(target): raise ValueError("请输入SSH密码，密码仅在本次使用期间保留")
             profile = self.selected_profile()
             if start and profile is None: raise ValueError("请先新建或导入启动配置")
             if start and any(task["state"] == "unknown" for task in self.launcher.tasks.values()):
                 if not messagebox.askyesno('Confirm - SSH Multi Terminal', "旧窗口状态无法确认，远端程序可能仍在运行。确认再次启动？", parent=self.root): return
         except (ValueError, OSError, RuntimeError) as exc: messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
-        self.log("正在验证SSH连接……")
+        self.log("正在准备本机启动……" if is_local(target) else "正在验证SSH连接……")
         if start:
             operation_epoch = self.launcher.control_epoch
             self._work(lambda: self.launcher.start(target, password, profile, expected_epoch=operation_epoch), lambda result: self.log("启动已调度；各窗口独立执行"))
+        elif is_local(target):
+            from .local import check_local
+            self._work(check_local, lambda result: self.log("本机 Bash 环境检查通过"))
         else:
             options = dict(self.launcher.connect_options)
             self._work(lambda: preflight(target, password, self.store.known_hosts, **options), lambda result: self.log("SSH连接及密码验证成功"))
@@ -484,7 +519,7 @@ class App(ttk.Frame):
             check_terminal()
             target = self.save_target(quiet=True); password = self.password.get()
             existing = None if force_new else self.launcher.find_debug_terminal(target, slot, index)
-            if not password and existing is None: raise ValueError("请输入SSH密码")
+            if not password and existing is None and not is_local(target): raise ValueError("请输入SSH密码")
         except (ValueError, OSError, RuntimeError) as exc:
             messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
         operation_epoch = self.launcher.control_epoch
@@ -508,13 +543,13 @@ class App(ttk.Frame):
         try:
             check_terminal()
             target = self.save_target(quiet=True); password = self.password.get()
-            if not password: raise ValueError("请输入SSH密码，密码仅在本次使用期间保留")
+            if not password and not is_local(target): raise ValueError("请输入SSH密码，密码仅在本次使用期间保留")
         except (ValueError, OSError, RuntimeError) as exc:
             messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
-        self.log("正在验证SSH连接并打开远程终端……")
+        self.log("正在打开本机终端……" if is_local(target) else "正在验证SSH连接并打开远程终端……")
         operation_epoch = self.launcher.control_epoch
         def opened(identifier):
-            self._manual_window_opened(identifier, "远程终端已打开，可在新窗口中手动输入命令")
+            self._manual_window_opened(identifier, "终端已打开，可在新窗口中手动输入命令")
         profile = self.selected_profile()
         self._work(lambda: self.launcher.open_remote_terminal(target, password, profile=profile, expected_epoch=operation_epoch), opened)
 
@@ -528,7 +563,7 @@ class App(ttk.Frame):
         for index, (identifier, task) in enumerate(live.items()):
             state = STATE_NAMES.get(task["state"], task["state"])
             if task.get("exit_code") is not None: state += f" ({task['exit_code']})"
-            values = (task["name"], "继承公共初始化目录" if task.get("inherits_init") else "远端登录目录", state)
+            values = (task["name"], "继承公共初始化目录" if task.get("inherits_init") else "本机用户目录" if task.get("local") else "远端登录目录", state)
             if self.manual_table.exists(identifier): self.manual_table.item(identifier, values=values, tags=row_tags(task["state"], index))
             else: self.manual_table.insert("", "end", iid=identifier, values=values, tags=row_tags(task["state"], index))
 
@@ -546,7 +581,7 @@ class App(ttk.Frame):
             if not window or not window["enabled"]: raise ValueError("请选择当前配置中启用的窗口")
             check_terminal()
             target = self.save_target(quiet=True); password = self.password.get()
-            if not password: raise ValueError("请输入SSH密码")
+            if not password and not is_local(target): raise ValueError("请输入SSH密码")
         except (ValueError, OSError, RuntimeError) as exc:
             messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
         identifier = window["id"]; operation_epoch = self.launcher.control_epoch
@@ -555,7 +590,7 @@ class App(ttk.Frame):
             if current and current["id"] == profile["id"] and self.table.exists(identifier):
                 self.table.selection_set(identifier); self.table.see(identifier)
             self.log("所选窗口已启动；其他窗口继续运行")
-        self.log("正在验证SSH连接并启动所选窗口……")
+        self.log("正在启动本机所选窗口……" if is_local(target) else "正在验证SSH连接并启动所选窗口……")
         self._work(lambda: self.launcher.start_window(target, password, profile, identifier,
                                                      expected_epoch=operation_epoch), started)
 
@@ -578,7 +613,7 @@ class App(ttk.Frame):
         current_task = tasks.get(window["id"]) if window and profile and profile["id"] == self.launcher.profile_id else None
         can_start = bool(window and window["enabled"] and not self.busy and
                          (not current_task or (current_task["state"] in FINAL and (not current_task.get("tmux_session") or current_task.get("stopped")))))
-        if self.launcher.active() and (not profile or profile["id"] != self.launcher.profile_id or self.target_id != self.launcher.target_id):
+        if self.launcher.active() and (not profile or profile["id"] != self.launcher.profile_id or self._current_target_id() != self.launcher.target_id):
             can_start = False
         self.start_window_button.state(["!disabled"] if can_start else ["disabled"])
         self.remote_terminal_button.state(["disabled"] if self.busy else ["!disabled"])
@@ -664,15 +699,15 @@ class App(ttk.Frame):
         identifier = self._selected_run_window()
         if identifier is None or self.busy: return
         try:
-            shell_spec = self.launcher.shell_specs.get(identifier)
-            target_id = shell_spec["target"]["id"] if shell_spec else self.launcher.target_id
-            if self.target_id != target_id: raise ValueError("请先切回该窗口的目标并输入其SSH密码")
+            spec = self.launcher.shell_specs.get(identifier) or self.launcher.window_specs[identifier]
+            target = spec["target"]
+            if target_key(self.target()) != target_key(target): raise ValueError("请先切回该窗口的启动位置和目标")
             password = self.password.get()
-            if not password: raise ValueError("请输入本轮目标的SSH密码")
+            if not password and not is_local(target): raise ValueError("请输入本轮目标的SSH密码")
             check_terminal()
         except (ValueError, OSError, RuntimeError) as exc:
             messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
-        self.log("正在验证连接并重启所选窗口……")
+        self.log("正在重启本机所选窗口……" if is_local(target) else "正在验证连接并重启所选窗口……")
         operation_epoch = self.launcher.control_epoch
         self._work(lambda: self.launcher.restart_window(identifier, password, expected_epoch=operation_epoch), lambda result: self.log("所选窗口已重新启动"))
         self._update_window_controls()

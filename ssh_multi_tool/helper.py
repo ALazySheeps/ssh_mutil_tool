@@ -12,6 +12,7 @@ from .broker import request
 from .ssh import connect, error_text
 from .reporting import Reporter
 from .tmux import build_tmux_script
+from .models import is_local
 
 
 class PhaseParser:
@@ -62,6 +63,9 @@ def loader_command(script: bytes, marker: str):
 
 
 def run_session(snapshot, events, *, output=None, interactive=True, stop=None):
+    if is_local(snapshot.get("target")):
+        from .local import run_local_session
+        return run_local_session(snapshot, events, output=output, interactive=interactive, stop=stop)
     output = output or sys.stdout.buffer
     client = None; channel = None; old_settings = None
     input_fd = None; previous_size = None; started = False; pending = bytearray()
@@ -151,10 +155,14 @@ def run_session(snapshot, events, *, output=None, interactive=True, stop=None):
 
 
 def helper_main(socket_path, token):
-    result = 255; snapshot = None
+    result = 255; snapshot = None; signal_handlers = {}
     stop = threading.Event(); done = threading.Event(); controller = None
     try:
         snapshot = request(socket_path, {"op": "claim", "token": token})
+        if is_local(snapshot["target"]):
+            import signal
+            for sig in (signal.SIGHUP, signal.SIGTERM):
+                signal_handlers[sig] = signal.signal(sig, lambda signum, frame: stop.set())
         def control():
             while not done.is_set():
                 try:
@@ -186,6 +194,7 @@ def helper_main(socket_path, token):
         print("\n无法启动会话：" + error_text(exc))
     finally:
         done.set()
+        for sig, handler in signal_handlers.items(): signal.signal(sig, handler)
         if controller is not None: controller.join(timeout=.2)
         if snapshot is not None:
             try: request(socket_path, {"op": "released", "token": snapshot["control_token"]})

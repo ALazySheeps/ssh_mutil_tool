@@ -9,7 +9,13 @@ def main():
     parser.add_argument("--focus-terminal", action="store_true", help="内部标签页定位模式")
     parser.add_argument("--title", help="待定位标签页标题")
     parser.add_argument("--pid", type=int, help="终端服务进程标识")
+    parser.add_argument("--local-child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--command", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.local_child:
+        if not args.command: parser.error("本机会话需要 --command")
+        from .local import child_main
+        child_main(args.command)
     if args.focus_terminal:
         if not args.title or not args.pid or args.pid <= 0: parser.error("定位模式需要 --title 和有效的 --pid")
         from .terminal_focus import focus_terminal
