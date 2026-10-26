@@ -33,7 +33,7 @@ class GuiTests(unittest.TestCase):
         app = App(self.root, self.store); self.addCleanup(app.launcher.close)
         self.root.deiconify(); self.root.update()
         app.table.selection_set('a')
-        x, y, width, height = app.table.bbox('b')
+        x, y, width, height = app.table.bbox('b', 'name')
         for timestamp in (1000, 1100):
             app.table.event_generate('<ButtonPress-1>', x=x + 10, y=y + height // 2, time=timestamp)
             app.table.event_generate('<ButtonRelease-1>', x=x + 10, y=y + height // 2, time=timestamp + 1)

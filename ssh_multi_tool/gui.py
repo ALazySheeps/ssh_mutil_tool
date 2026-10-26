@@ -38,6 +38,9 @@ class App(ttk.Frame):
         self.work_queue = queue.Queue(maxsize=32); self.busy = False; self.last_states = {}
         self.launcher = Launcher(self.store.known_hosts)
         self.targets = []; self.profiles = []; self.target_id = None
+        self.task_checks = {}
+        self.all_tasks_selected = tk.BooleanVar(value=False)
+        self.task_selection_summary = tk.StringVar()
         self.target_choice = tk.StringVar(); self.profile_choice = tk.StringVar()
         self.execution_mode = tk.StringVar(value="remote")
         self.target_vars = {key: tk.StringVar(value="22" if key == "port" else "")
@@ -196,15 +199,26 @@ class App(ttk.Frame):
         for page in (self.config_page, self.manual_page):
             page.columnconfigure(0, weight=1); page.rowconfigure(0, weight=1)
         self.window_tabs.bind('<<NotebookTabChanged>>', lambda event: self._update_window_controls())
-        self.table = ttk.Treeview(self.config_page, columns=('name', 'directory', 'delay', 'state'), show='headings', height=5, selectmode='browse')
+        self.config_page.rowconfigure(0, weight=0); self.config_page.rowconfigure(1, weight=1)
+        selection = ttk.Frame(self.config_page); selection.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(4, 8))
+        self.select_all_tasks_button = ttk.Checkbutton(selection, text='全选 / 取消全选', variable=self.all_tasks_selected,
+                                                       command=self.select_all_tasks)
+        self.select_all_tasks_button.pack(side='left')
+        ttk.Label(selection, textvariable=self.task_selection_summary, style='Muted.TLabel').pack(side='left', padx=(12, 0))
+        self.table = ttk.Treeview(self.config_page, columns=('name', 'directory', 'delay', 'state'), show='tree headings', height=5, selectmode='browse')
+        self.table.heading('#0', text='选择')
+        self.table.column('#0', width=54, minwidth=54, stretch=False)
+        self.table.bind('<Button-1>', self.toggle_task_checkbox)
+        self.table.bind('<space>', self.toggle_task_checkbox)
         self.manual_table = ttk.Treeview(self.manual_page, columns=('name', 'directory', 'state'), show='headings', height=5, selectmode='browse')
         for table, page, columns in ((self.table, self.config_page, [('name', '窗口', 150), ('directory', '工作目录', 220), ('delay', '延迟 / 秒', 70), ('state', '状态', 135)]),
                                       (self.manual_table, self.manual_page, [('name', '目标 / 终端', 250), ('directory', '初始目录', 210), ('state', '状态', 135)])):
             for column, label, width in columns:
                 table.heading(column, text=label, anchor='w'); table.column(column, width=width, minwidth=60, stretch=column in {'name', 'directory'})
-            table.grid(row=0, column=0, sticky='nsew'); style_table(table)
+            row = 1 if page is self.config_page else 0
+            table.grid(row=row, column=0, sticky='nsew'); style_table(table)
             scrollbar = ttk.Scrollbar(page, orient='vertical', command=table.yview)
-            scrollbar.grid(row=0, column=1, sticky='ns'); table.configure(yscrollcommand=scrollbar.set)
+            scrollbar.grid(row=row, column=1, sticky='ns'); table.configure(yscrollcommand=scrollbar.set)
             table.bind('<<TreeviewSelect>>', lambda event: self._update_window_controls())
         self.table.bind('<Double-1>', self.show_window_commands)
         self.table.bind('<Return>', lambda event: self.show_window_commands())
@@ -229,7 +243,7 @@ class App(ttk.Frame):
         actions = ttk.Frame(workspace, style='App.TFrame'); actions.grid(row=3, column=0, sticky='ew', pady=(12, 0))
         self.remote_terminal_button = ttk.Button(actions, text='打开远程终端', command=self.open_remote_terminal)
         self.remote_terminal_button.pack(side='left')
-        self.launch_button = ttk.Button(actions, text='一键启动', style='Launch.TButton', command=lambda: self.connection(True))
+        self.launch_button = ttk.Button(actions, text='启动所选任务', style='Launch.TButton', command=lambda: self.connection(True))
         self.launch_button.pack(side='right')
         self.close_all_button = ttk.Button(actions, text='一键断开', command=self.close_all_windows, state='disabled')
         self.close_all_button.pack(side='right', padx=(0, 8))
@@ -347,13 +361,71 @@ class App(ttk.Frame):
             enabled = sum(window["enabled"] for window in profile["windows"])
             lines = len(profile["common_init"].splitlines())
             self.summary.set(f"{enabled} 个启用窗口 · 公共初始化 {lines} 行 · {profile['description']}")
+            checks = self.task_checks.setdefault(profile["id"], {})
+            live_ids = {window["id"] for window in profile["windows"]}
+            for identifier in list(checks):
+                if identifier not in live_ids: del checks[identifier]
             for index, window in enumerate(profile["windows"]):
+                checks.setdefault(window["id"], window["enabled"])
+                if not window["enabled"]: checks[window["id"]] = False
                 self.table.insert("", "end", iid=window["id"], values=(window["name"], window["working_directory"] or "继承初始化目录",
                                   window["start_delay_seconds"], "待启动" if window["enabled"] else "已禁用"), tags=row_tags("waiting", index))
         else: self.summary.set("尚无配置。可新建配置或导入示例。")
         self._sync_remote_windows(self.launcher.poll())
         self._update_window_controls()
         if hasattr(self, "preferences"): self._save_preferences()
+
+    def checked_task_ids(self):
+        profile = self.selected_profile()
+        if profile is None: return set()
+        checks = self.task_checks.get(profile["id"], {})
+        return {window["id"] for window in profile["windows"] if window["enabled"] and checks.get(window["id"], False)}
+
+    def refresh_task_checkboxes(self):
+        profile = self.selected_profile()
+        chosen = self.checked_task_ids()
+        enabled = sum(window["enabled"] for window in profile["windows"]) if profile else 0
+        if profile:
+            for window in profile["windows"]:
+                if self.table.exists(window["id"]):
+                    text = "—" if not window["enabled"] else "☑" if window["id"] in chosen else "☐"
+                    self.table.item(window["id"], text=text)
+        self.all_tasks_selected.set(bool(enabled and len(chosen) == enabled))
+        self.select_all_tasks_button.state(["alternate"] if 0 < len(chosen) < enabled else ["!alternate"])
+        self.select_all_tasks_button.state(["disabled"] if self.busy or not enabled else ["!disabled"])
+        self.task_selection_summary.set(f"已勾选 {len(chosen)} / {enabled} 个可启动任务")
+        self.launch_button.state(["disabled"] if not chosen or self.busy or self.launcher.active() else ["!disabled"])
+
+    def select_all_tasks(self):
+        profile = self.selected_profile()
+        if profile is None or self.busy: return
+        chosen = self.all_tasks_selected.get()
+        self.task_checks[profile["id"]] = {window["id"]: chosen and window["enabled"] for window in profile["windows"]}
+        self.refresh_task_checkboxes()
+
+    def toggle_task_checkbox(self, event):
+        keyboard = event.keysym == "space"
+        if not keyboard and self.table.identify_column(event.x) != "#0": return
+        if self.busy: return "break"
+        identifier = (self.table.focus() or next(iter(self.table.selection()), "")) if keyboard else self.table.identify_row(event.y)
+        profile = self.selected_profile()
+        if profile is not None:
+            window = next((window for window in profile["windows"] if window["id"] == identifier), None)
+            if window and window["enabled"]:
+                checks = self.task_checks[profile["id"]]
+                checks[identifier] = not checks[identifier]
+                self.refresh_task_checkboxes()
+        return "break"
+
+    def checked_profile(self):
+        profile = self.selected_profile()
+        if profile is None: raise ValueError("请先新建或导入启动配置")
+        chosen = self.checked_task_ids()
+        if not chosen: raise ValueError("请至少勾选一个要启动的任务")
+        snapshot = copy.deepcopy(profile)
+        for window in snapshot["windows"]:
+            window["enabled"] = window["id"] in chosen
+        return snapshot
 
     def save_keep_alive(self):
         if self.execution_mode.get() == "local": return
@@ -377,6 +449,7 @@ class App(ttk.Frame):
 
     def show_window_commands(self, event=None):
         if event is not None:
+            if self.table.identify_column(event.x) == "#0": return self.toggle_task_checkbox(event)
             identifier = self.table.identify_row(event.y)
             if not identifier or self.table.identify_region(event.x, event.y) != 'cell': return
             self.table.selection_set(identifier)
@@ -469,11 +542,10 @@ class App(ttk.Frame):
     def connection(self, start):
         if self.busy: return
         try:
+            profile = self.checked_profile() if start else self.selected_profile()
             if start: check_terminal()
             target = self.save_target(quiet=True); password = self.password.get()
             if not password and not is_local(target): raise ValueError("请输入SSH密码，密码仅在本次使用期间保留")
-            profile = self.selected_profile()
-            if start and profile is None: raise ValueError("请先新建或导入启动配置")
             if start and any(task["state"] == "unknown" for task in self.launcher.tasks.values()):
                 if not messagebox.askyesno('Confirm - SSH Multi Terminal', "旧窗口状态无法确认，远端程序可能仍在运行。确认再次启动？", parent=self.root): return
         except (ValueError, OSError, RuntimeError) as exc: messagebox.showerror('Error - SSH Multi Terminal', str(exc), parent=self.root); return
@@ -604,6 +676,7 @@ class App(ttk.Frame):
         return None
 
     def _update_window_controls(self):
+        self.refresh_task_checkboxes()
         self._refresh_debug_buttons()
         identifier = self._selected_run_window()
         tasks = self.launcher.poll()
@@ -772,7 +845,6 @@ class App(ttk.Frame):
             if self.last_states.get((session_id, identifier)) != signature:
                 self.last_states[(session_id, identifier)] = signature
                 self.log(f"{task['name']}：{state}" + (" · " + task["error"] if task.get("error") else ""))
-        self.launch_button.state(["disabled"] if self.busy or self.launcher.active() else ["!disabled"])
         self._update_window_controls()
         self.root.after(100, self._poll)
 
