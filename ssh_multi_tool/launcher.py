@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 from .broker import Broker
-from .models import validate_profile, validate_target
+from .models import validate_profile, validate_target, is_local
 from .scripts import build_script, build_interactive_script
 from .settings import validate_debug_slot
 from .ssh import preflight, error_text
@@ -47,6 +47,13 @@ class Launcher:
     def has_pending(self):
         with self.lock: return any(task["state"] == "waiting" for task in self.tasks.values())
 
+    def _preflight(self, target, password, options):
+        if is_local(target):
+            from .local import check_local
+            check_local()
+        else:
+            self.preflight_fn(target, password, Path(self.known_hosts), **options)
+
     def start(self, target, password, profile, *, expected_epoch=None):
         target = validate_target(target); profile = validate_profile(profile)
         with self.lock:
@@ -55,9 +62,9 @@ class Launcher:
             if self.active(): raise ValueError("已有活动任务，请先处理当前终端")
             self.starting = True
             self.cancel = threading.Event()
-            start_cancel = self.cancel; keep_alive = self.keep_alive
+            start_cancel = self.cancel; keep_alive = self.keep_alive and not is_local(target)
         try:
-            self.preflight_fn(target, password, Path(self.known_hosts), **self.connect_options)
+            self._preflight(target, password, self.connect_options)
             if keep_alive: self.tmux_check_fn(target, password, self.known_hosts, **self.connect_options)
             with self.lock:
                 if self.closed or start_cancel.is_set(): raise ValueError("启动已取消")
@@ -114,7 +121,7 @@ class Launcher:
 
     def start_window(self, target, password, profile, identifier, *, expected_epoch=None):
         target = validate_target(target); profile = validate_profile(profile)
-        if not password: raise ValueError("请输入SSH密码")
+        if not password and not is_local(target): raise ValueError("请输入SSH密码")
         window = next((w for w in profile["windows"] if w["id"] == identifier), None)
         if window is None or not window["enabled"]: raise ValueError("请选择当前配置中启用的窗口")
         with self.lock:
@@ -130,9 +137,9 @@ class Launcher:
                 raise ValueError("该窗口的保活会话仍受管理，请使用重新连接或先停止程序")
             if identifier in self.restarting: raise ValueError("窗口正在操作，请稍后重试")
             if task and task["state"] not in FINAL: raise ValueError("该窗口已有活动任务或状态未知，请先关闭")
-            options = dict(self.connect_options); keep_alive = self.keep_alive; self.starting = True
+            options = dict(self.connect_options); keep_alive = self.keep_alive and not is_local(target); self.starting = True
         try:
-            self.preflight_fn(target, password, Path(self.known_hosts), **options)
+            self._preflight(target, password, options)
             if keep_alive: self.tmux_check_fn(target, password, self.known_hosts, **options)
             with self.lock:
                 if self.closed or epoch != self.control_epoch: raise ValueError("启动已取消")
@@ -193,15 +200,15 @@ class Launcher:
             epoch = self.control_epoch
             if expected_epoch is not None and expected_epoch != epoch: raise ValueError("启动已取消")
             existing = self.find_debug_terminal(target, debug_slot, slot_index) if debug_slot is not None and not force_new else None
-            options = dict(self.connect_options); keep_alive = self.keep_alive
+            options = dict(self.connect_options); keep_alive = self.keep_alive and not is_local(target)
         if existing is not None:
             current = self.poll().get(existing)
             if current is None: raise ValueError("会话已关闭，请重新打开")
             if current.get("tmux_session") and current["state"] in FINAL | {"unknown"}:
                 self.reconnect_window(existing, password, expected_epoch=epoch)
             return existing
-        if not password: raise ValueError("请输入SSH密码")
-        self.preflight_fn(target, password, Path(self.known_hosts), **options)
+        if not password and not is_local(target): raise ValueError("请输入SSH密码")
+        self._preflight(target, password, options)
         if keep_alive: self.tmux_check_fn(target, password, self.known_hosts, **options)
         with self.lock:
             if self.closed or self.control_epoch != epoch: raise ValueError("启动已取消")
@@ -212,7 +219,7 @@ class Launcher:
             if self.broker is None: self.broker = self.broker_factory()
             identifier = "shell_" + uuid.uuid4().hex
             self.shell_count += 1
-            name = f"{target['name']} · {debug_slot['name']}" if debug_slot else f"{target['name']} · 远程终端 {self.shell_count}"
+            name = f"{target['name']} · {debug_slot['name']}" if debug_slot else f"{target['name']} · {'本机终端' if is_local(target) else '远程终端'} {self.shell_count}"
             self.shell_specs[identifier] = {"target": target, "connect_options": options, "name": name, "profile": profile, "debug_slot": debug_slot, "slot_index": slot_index,
                 "tmux_session": (session_name(target, "debug", str(slot_index) if slot_index is not None else debug_slot["name"])
                     if debug_slot is not None and not force_new else session_name(target, "manual", identifier)) if keep_alive else None}
@@ -227,14 +234,17 @@ class Launcher:
         script_marker = "" if spec.get("tmux_session") else marker
         if spec["debug_slot"] is not None:
             script = build_script(spec["profile"], {"working_directory": "", "commands": spec["debug_slot"]["commands"]}, script_marker)
-        else: script = build_interactive_script(spec["profile"], script_marker) if spec["profile"] is not None else "exec bash --noprofile --norc -i\n" if spec.get("tmux_session") else ""
+        elif spec["profile"] is not None or is_local(spec["target"]) or spec.get("tmux_session"):
+            script = build_interactive_script(spec["profile"], script_marker)
+        else:
+            script = ""
         snapshot = {"run_id": session_id, "task_id": identifier, "target": spec["target"],
                     "password": password, "known_hosts": self.known_hosts, "mode": "debug" if spec["debug_slot"] is not None else "shell",
                     "script": script, "marker": marker, "connect_options": spec["connect_options"], "tmux_session": spec.get("tmux_session"), "tmux_attach_only": attach_only}
         token = self.broker.issue(snapshot)
         task = self.shell_tasks[identifier]
         task.clear()
-        task.update(name=spec["name"], mode="shell", inherits_init=spec["profile"] is not None, state="opening", token=token,
+        task.update(name=spec["name"], mode="shell", local=is_local(spec["target"]), inherits_init=spec["profile"] is not None, state="opening", token=token,
                     session_id=session_id, opened_at=time.monotonic(), tmux_session=spec.get("tmux_session"))
         return {"target": spec["target"], "token": token, "title": spec["name"], "task": task,
                 "identifier": identifier, "epoch": self.control_epoch, "raise_errors": True}
@@ -372,7 +382,6 @@ class Launcher:
             with self.lock: self.restarting.discard(identifier)
 
     def _restart_window(self, identifier, password, *, expected_epoch=None, reconnect=False):
-        if not password: raise ValueError("请输入本轮目标的SSH密码")
         with self.lock:
             if self.closed: raise ValueError("启动器已关闭")
             if identifier not in self.all_tasks(): raise ValueError("窗口尚未启动")
@@ -383,8 +392,9 @@ class Launcher:
             target = copy.deepcopy(spec["target"])
             options = dict(spec["connect_options"])
             window = None if is_shell else spec["window"]
+        if not password and not is_local(target): raise ValueError("请输入本轮目标的SSH密码")
         # Validate credentials before interrupting the existing session.
-        self.preflight_fn(target, password, Path(self.known_hosts), **options)
+        self._preflight(target, password, options)
         if spec.get("tmux_session") and not reconnect:
             with self.lock:
                 if self.closed or self.control_epoch != epoch: raise ValueError("重启已取消")

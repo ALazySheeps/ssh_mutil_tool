@@ -131,13 +131,14 @@ class Store:
 
     @staticmethod
     def _validate_preferences(data):
-        allowed = {"last_target_id", "last_profile_id", "geometry", "terminal", "connect_timeout", "auth_timeout", "keep_alive"}
+        allowed = {"last_target_id", "last_profile_id", "geometry", "terminal", "connect_timeout", "auth_timeout", "keep_alive", "execution_mode"}
         allowed |= {f"debug_slot_{index}_{key}" for index in range(1, 5) for key in ("name", "commands")}
         if not isinstance(data, dict) or data.keys() - allowed:
             raise ValueError("未知偏好字段")
         if any(not isinstance(value, str) for value in data.values()): raise ValueError("偏好值须为文本")
         debug_slots(data)
         if data.get("keep_alive", "0") not in {"0", "1"}: raise ValueError("断线保活设置须为0或1")
+        if data.get("execution_mode", "remote") not in {"remote", "local"}: raise ValueError("启动位置须为远程或本机")
 
     def save_preferences(self, data):
         self._validate_preferences(data)

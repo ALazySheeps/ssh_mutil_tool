@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import List
 
+from .models import is_local
+
 
 def helper_argv(socket_path: str, token: str) -> List[str]:
     if getattr(sys, "frozen", False):
@@ -37,6 +39,7 @@ def open_terminal(socket_path: str, token: str, title: str):
 
 
 def target_key(target):
+    if is_local(target): return ("local",)
     return (target['host'].lower(), target['port'], target['username'])
 
 

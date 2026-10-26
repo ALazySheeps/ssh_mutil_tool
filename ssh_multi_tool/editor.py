@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
+from .ui import apply_theme, style_text
 from .models import validate_profile
 
 
@@ -39,7 +40,7 @@ class ProfileEditor(tk.Toplevel):
     def __init__(self, parent, profile, on_save):
         super().__init__(parent)
         self.title('Launch Profile Editor'); self.geometry("980x720"); self.minsize(780, 580)
-        self.transient(parent); self.grab_set()
+        self.transient(parent); self.grab_set(); apply_theme(self)
         self.data = EditorData(profile); self.on_save = on_save; self.index = None
         if not self.data.profile["windows"]: self.data.add_window()
         self.original = copy.deepcopy(self.data.profile)
@@ -53,7 +54,7 @@ class ProfileEditor(tk.Toplevel):
 
     def _build(self):
         self.columnconfigure(0, weight=1); self.rowconfigure(1, weight=1)
-        header = ttk.Frame(self, padding=12); header.grid(row=0, column=0, sticky="ew")
+        header = ttk.Frame(self, padding=16); header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(1, weight=1)
         ttk.Label(header, text="配置名称").grid(row=0, column=0, padx=(0, 8))
         ttk.Entry(header, textvariable=self.name).grid(row=0, column=1, sticky="ew")
@@ -65,6 +66,7 @@ class ProfileEditor(tk.Toplevel):
         ttk.Label(common, text="以下命令在每个窗口执行一次。请使用 export 让环境变量被子进程继承。",
                   wraplength=800).grid(row=0, column=0, sticky="w", pady=(0, 10))
         self.common = ScrolledText(common, wrap="none", undo=True, font=("TkFixedFont", 11))
+        style_text(self.common, code=True)
         self.common.grid(row=1, column=0, sticky="nsew"); self.common.insert("1.0", self.data.profile["common_init"])
         ttk.Label(common, text="示例：source /opt/ros/humble/setup.bash\nexport ROS_DOMAIN_ID=10\nexport RMW_IMPLEMENTATION=rmw_cyclonedds_cpp").grid(row=2, column=0, sticky="w", pady=10)
         windows = ttk.Frame(book, padding=10); book.add(windows, text="终端窗口")
@@ -72,6 +74,7 @@ class ProfileEditor(tk.Toplevel):
         left = ttk.Frame(windows); left.grid(row=0, column=0, sticky="ns", padx=(0, 12))
         left.rowconfigure(0, weight=1)
         self.listbox = tk.Listbox(left, width=23, exportselection=False)
+        style_text(self.listbox)
         self.listbox.grid(row=0, column=0, columnspan=2, sticky="ns")
         self.listbox.bind("<<ListboxSelect>>", self._select)
         actions = [("新建窗口", "add"), ("复制", "copy"), ("删除", "delete"), ("上移", "up"), ("下移", "down")]
@@ -85,10 +88,11 @@ class ProfileEditor(tk.Toplevel):
         ttk.Checkbutton(right, text="启用此窗口", variable=self.enabled).grid(row=3, column=1, sticky="w", pady=5)
         ttk.Label(right, text="启动命令 · 完整 Bash 片段").grid(row=4, column=0, columnspan=2, sticky="w", pady=8)
         self.commands = ScrolledText(right, wrap="none", undo=True, font=("TkFixedFont", 11))
+        style_text(self.commands, code=True)
         self.commands.grid(row=5, column=0, columnspan=2, sticky="nsew")
         ttk.Label(right, text="工作目录可留空，或使用 /绝对路径、~/路径。\n前台程序结束后才执行下一条命令；多个常驻程序建议分窗口。\n延迟相对于本轮共同起点，不保证节点已就绪。", wraplength=650).grid(row=6, column=0, columnspan=2, sticky="w", pady=10)
         footer = ttk.Frame(self, padding=12); footer.grid(row=2, column=0, sticky="ew")
-        ttk.Button(footer, text="保存配置", command=self._save).pack(side="right")
+        ttk.Button(footer, text="保存配置", command=self._save, style="Primary.TButton").pack(side="right")
         ttk.Button(footer, text="取消", command=self._close).pack(side="right", padx=8)
 
     def _flush(self):

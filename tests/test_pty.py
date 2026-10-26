@@ -94,6 +94,29 @@ class PtyTests(unittest.TestCase):
             self.assertIn(f'VALUE=10:yes:{work}'.encode(), output)
             self.assertIn('interactive', phases)
 
+    def test_interactive_prompt_shows_user_host_and_tracks_directory_changes(self):
+        import pwd
+        import socket
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / 'work space' / 'child').mkdir(parents=True)
+            data = profile(); data['common_init'] = "unset PS1; cd 'work space'"
+            marker = 'c' * 32
+            code, output, _ = self.execute(scripts.build_interactive_script(data, marker), marker, root,
+                                           keys='cd child\nexit\n')
+            self.assertEqual(code, 0)
+            prefix = pwd.getpwuid(os.getuid()).pw_name + '@' + socket.gethostname().split('.')[0]
+            self.assertIn((prefix + ':~/work space').encode(), output)
+            self.assertIn((prefix + ':~/work space/child').encode(), output)
+
+    def test_interactive_shell_keeps_prompt_set_by_common_init(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = profile(); data['common_init'] = "PS1='board-debug> '"
+            marker = 'd' * 32
+            code, output, _ = self.execute(scripts.build_interactive_script(data, marker), marker, Path(directory),
+                                           keys='exit\n')
+            self.assertEqual(code, 0)
+            self.assertIn(b'board-debug> ', output)
+
     def test_failed_common_init_does_not_enter_interactive_shell(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = profile(); data['common_init'] = 'false'

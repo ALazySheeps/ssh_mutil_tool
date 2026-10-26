@@ -57,7 +57,19 @@ def validate_profile(data: dict) -> dict:
     return copy.deepcopy(data)
 
 
+def is_local(target):
+    return isinstance(target, dict) and target.get("mode") == "local"
+
+
+def local_target():
+    return {"id": "__local__", "name": "本机", "mode": "local"}
+
+
 def validate_target(data: dict) -> dict:
+    if is_local(data):
+        _fields(data, ("id", "name", "mode"))
+        _id(data); _text(data, "name", True)
+        return copy.deepcopy(data)
     _fields(data, ("id", "name", "host", "port", "username"))
     _id(data)
     for field in ("name", "host", "username"):
