@@ -46,7 +46,9 @@ class ScriptsTests(unittest.TestCase):
         data = profile(); data["common_init"] = "false"
         window = data["windows"][0]; window["working_directory"] = ""
         window["commands"] = "echo SHOULD_NOT_RUN"
-        result = subprocess.run([BASH, "--noprofile", "--norc"], input=build_script(data, window).encode("utf-8"),
-                                capture_output=True, env={**os.environ, "HOME": bash_path(Path.cwd())})
-        self.assertNotEqual(result.returncode, 0); self.assertNotIn(b"SHOULD_NOT_RUN", result.stdout)
-        self.assertEqual(result.stderr, b"")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run([BASH, "--noprofile", "--norc"], input=build_script(data, window).encode("utf-8"),
+                                    capture_output=True, env={**os.environ, "HOME": bash_path(Path(tmp))})
+        # Interactive Bash may warn about job control in this non-PTY unit test.
+        self.assertEqual(result.returncode, 1, result.stderr.decode("utf-8"))
+        self.assertNotIn(b"SHOULD_NOT_RUN", result.stdout)

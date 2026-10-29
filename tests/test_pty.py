@@ -68,6 +68,65 @@ class PtyTests(unittest.TestCase):
                                       marker, Path(directory))
         self.assertEqual(code, 0)
 
+    def test_task_loads_interactive_bashrc_once_before_common_init(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '.bashrc').write_text('''case $- in *i*) ;; *) return;; esac
+echo rc >> "$HOME/order"
+export ROS_DOMAIN_ID=42
+alias ros_alias='printf "ALIAS_OK\\n"'
+ros_function() { printf 'FUNCTION_OK\\n'; }
+false
+''')
+            data = profile()
+            data['common_init'] = '''echo "init:$ROS_DOMAIN_ID" >> "$HOME/order"
+export ROS_DOMAIN_ID=77'''
+            window = data['windows'][0]
+            window.update(working_directory='', commands='''ros_alias
+ros_function
+printenv ROS_DOMAIN_ID''')
+            marker = 'a' * 32
+            code, output, _ = self.execute(build_script(data, window, marker), marker, root)
+            self.assertEqual(code, 0, output)
+            self.assertEqual((root / 'order').read_text(), 'rc\ninit:42\n')
+            self.assertIn(b'ALIAS_OK\nFUNCTION_OK\n77\n', output)
+
+    def test_manual_shell_retains_bashrc_functions_aliases_and_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'work').mkdir()
+            (root / '.bashrc').write_text('''case $- in *i*) ;; *) return;; esac
+echo rc >> "$HOME/order"
+export ROS_DOMAIN_ID=42
+alias ros_alias='printf "ALIAS_OK\\n"'
+ros_function() { printf 'FUNCTION_OK\\n'; }
+PS1='ros-shell> '
+''')
+            data = profile()
+            data['common_init'] = '''echo "init:$ROS_DOMAIN_ID" >> "$HOME/order"
+export ROS_DOMAIN_ID=77
+cd work'''
+            marker = 'b' * 32
+            code, output, _ = self.execute(scripts.build_interactive_script(data, marker), marker, root,
+                keys='ros_alias\nros_function\nfalse\nprintf "VALUE=%s:%s\\n" "$ROS_DOMAIN_ID" "$PWD"\nexit\n')
+            self.assertEqual(code, 0, output)
+            self.assertEqual((root / 'order').read_text(), 'rc\ninit:42\n')
+            self.assertIn(b'ALIAS_OK\n', output)
+            self.assertIn(b'FUNCTION_OK\n', output)
+            self.assertIn(b'ros-shell> ', output)
+            self.assertIn(f'VALUE=77:{root}/work'.encode(), output)
+
+    def test_manual_shell_without_profile_loads_bashrc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '.bashrc').write_text('''case $- in *i*) ;; *) return;; esac
+export ROS_DOMAIN_ID=42
+''')
+            marker = 'c' * 32
+            code, output, _ = self.execute(scripts.build_interactive_script(None, marker), marker, root,
+                keys='printenv ROS_DOMAIN_ID\nexit\n')
+            self.assertEqual(code, 0, output)
+            self.assertIn(b'42\n', output)
+
     def test_loader_runs_large_script_with_source_export_and_literal_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); work = root / "中文 space $(touch injected)"; work.mkdir()
